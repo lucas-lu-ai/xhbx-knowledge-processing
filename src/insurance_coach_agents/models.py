@@ -9,11 +9,30 @@ M1 仅实现解析层所需的 ``FileType`` / ``ParsedFile`` / ``RawSection``。
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def _coerce_str_list(value: object) -> object:
+    """把 LLM 偶尔返回的「JSON 字符串形式的列表」规整回真正的 list。
+
+    部分模型（如 qwen）的结构化输出会把 list 字段序列化成字符串
+    （如 ``'["a", "b"]'`` 甚至单条文本），这里在 pydantic 校验前做兼容。
+    """
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        try:
+            parsed = json.loads(stripped)
+        except (ValueError, TypeError):
+            return [stripped]
+        return parsed if isinstance(parsed, list) else [stripped]
+    return value
 
 
 class FileType(str, Enum):
@@ -123,6 +142,11 @@ class Assessment(BaseModel):
         ge=0.0, le=1.0, description="综合入库价值评分，0~1，越高越值得沉淀"
     )
 
+    @field_validator("topics", mode="before")
+    @classmethod
+    def _coerce_topics(cls, v: object) -> object:
+        return _coerce_str_list(v)
+
 
 class ExtractedDoc(BaseModel):
     """ExtractorAgent 的提取产物：标准化 Markdown 正文（不含 frontmatter）。"""
@@ -131,3 +155,31 @@ class ExtractedDoc(BaseModel):
 
     title: str = Field(description="知识单元标题（取课程/章节主题）")
     body_markdown: str = Field(description="带一二级标题的标准化 Markdown 正文")
+
+
+class ReviewResult(BaseModel):
+    """ReviewerAgent 的质检结论：对提取稿的规范性与信息保真做审计。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    passed: bool = Field(description="整体是否通过质检（无严重问题）")
+    heading_ok: bool = Field(
+        description="Markdown 标题层级是否规范（有唯一一级标题、层级不跳级、无代码围栏残留）"
+    )
+    fidelity_ok: bool = Field(
+        description="正文是否忠于素材：无明显杜撰的事实/数字，关键话术与流程无严重遗漏"
+    )
+    no_meta_leak: bool = Field(
+        description="是否没有元注释/加工旁白泄漏（如『基于讲义框架』『未做虚构』之类）"
+    )
+    issues: list[str] = Field(
+        default_factory=list, description="发现的具体问题列表，逐条说明"
+    )
+    score: float = Field(
+        ge=0.0, le=1.0, description="整理质量综合评分，0~1，越高越好"
+    )
+
+    @field_validator("issues", mode="before")
+    @classmethod
+    def _coerce_issues(cls, v: object) -> object:
+        return _coerce_str_list(v)

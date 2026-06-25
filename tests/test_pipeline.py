@@ -34,19 +34,34 @@ def _make_cases(tmp_path: Path, n_sections: int = 2) -> Path:
     return cases
 
 
+_ASSESS_CONTENT = {
+    "worth_storing": True,
+    "reason": "包含可复用方法论",
+    "topics": ["需求面谈"],
+    "serves": {"qa": "high", "recommend": "mid", "exam": "low", "roleplay": "high"},
+    "value_score": 0.7,
+}
+_REVIEW_CONTENT = {
+    "passed": True,
+    "heading_ok": True,
+    "fidelity_ok": True,
+    "no_meta_leak": True,
+    "issues": [],
+    "score": 0.9,
+}
+
+
 class _FakeStructured:
-    content = {
-        "worth_storing": True,
-        "reason": "包含可复用方法论",
-        "topics": ["需求面谈"],
-        "serves": {"qa": "high", "recommend": "mid", "exam": "low", "roleplay": "high"},
-        "value_score": 0.7,
-    }
+    def __init__(self, content: dict) -> None:
+        self.content = content
 
 
 class _FakeModel:
     async def generate_structured_output(self, messages, structured_model):
-        return _FakeStructured()
+        # 按目标结构返回对应内容：Assessment / ReviewResult。
+        if structured_model.__name__ == "ReviewResult":
+            return _FakeStructured(_REVIEW_CONTENT)
+        return _FakeStructured(_ASSESS_CONTENT)
 
     async def __call__(self, messages):
         return {"content": [{"type": "text", "text": "# 测试标题\n## 模块\n正文"}]}
@@ -94,6 +109,26 @@ def test_run_pipeline_produces_outputs_and_manifest(tmp_path):
     assert manifest["summary"]["ok"] == 2
     assert manifest["summary"]["worth_storing"] == 2
     assert len(list(out.rglob("*.md"))) == 2
+
+
+def test_run_pipeline_with_review_records_verdict(tmp_path):
+    cases = _make_cases(tmp_path, n_sections=1)
+    out = tmp_path / "out"
+
+    results = asyncio.run(
+        run_pipeline(
+            group_by_directory(cases),
+            _FakeModel(),
+            output_dir=out,
+            vision=False,
+            review=True,
+        )
+    )
+
+    assert results[0].review_passed is True
+    assert results[0].review_score == 0.9
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["summary"]["review_failed"] == 0
 
 
 def test_run_pipeline_incremental_skips_existing(tmp_path):

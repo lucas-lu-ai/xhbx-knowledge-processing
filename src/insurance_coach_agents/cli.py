@@ -18,6 +18,7 @@ from .agents import (
     AssessorAgent,
     ExtractorAgent,
     ImageDescriber,
+    ReviewerAgent,
     build_chat_model,
     build_vision_model,
     enrich_section_with_vision,
@@ -72,7 +73,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
-async def _build_section(section_rel: str, vision: bool) -> int:
+async def _build_section(section_rel: str, vision: bool, review: bool) -> int:
     section_dir = (CASES_DIR / section_rel).resolve()
     section = load_section(section_dir)
     model = build_chat_model()
@@ -96,8 +97,10 @@ async def _build_section(section_rel: str, vision: bool) -> int:
         describer = ImageDescriber(
             vision_model, cache_dir=OUTPUT_DIR / IMAGE_CACHE_DIRNAME
         )
-        pptx_paths = sorted(section_dir.glob("*.pptx"))
-        vision_block = await enrich_section_with_vision(pptx_paths, describer)
+        source_paths = sorted(section_dir.glob("*.pptx")) + sorted(
+            section_dir.glob("*.pdf")
+        )
+        vision_block = await enrich_section_with_vision(source_paths, describer)
         if vision_block:
             doc = ExtractedDoc(
                 title=doc.title,
@@ -107,13 +110,29 @@ async def _build_section(section_rel: str, vision: bool) -> int:
         else:
             print("  无可入库的配图信息")
 
+    if review:
+        print("质检中...")
+        reviewer = ReviewerAgent(model)
+        verdict = await reviewer.review(section, doc)
+        print(
+            f"  质检 passed={verdict.passed} score={verdict.score} "
+            f"heading_ok={verdict.heading_ok} fidelity_ok={verdict.fidelity_ok} "
+            f"no_meta_leak={verdict.no_meta_leak}"
+        )
+        for issue in verdict.issues:
+            print(f"  · {issue}")
+
     result = write_section_output(section, assessment, doc)
     print(f"已写出:\n  {result.markdown_path}\n  {result.meta_path}")
     return 0
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
-    return asyncio.run(_build_section(args.section, vision=not args.no_vision))
+    return asyncio.run(
+        _build_section(
+            args.section, vision=not args.no_vision, review=args.review
+        )
+    )
 
 
 async def _run_all(args: argparse.Namespace) -> int:
@@ -128,9 +147,10 @@ async def _run_all(args: argparse.Namespace) -> int:
         return 1
 
     vision = not args.no_vision
+    review = args.review
     print(
         f"待处理知识单元: {len(groups)} | 分组={args.grouping} "
-        f"| 并发={args.concurrency} | force={args.force} | 视觉={vision}"
+        f"| 并发={args.concurrency} | force={args.force} | 视觉={vision} | 质检={review}"
     )
     model = build_chat_model()
     vision_model = build_vision_model() if vision else None
@@ -141,6 +161,7 @@ async def _run_all(args: argparse.Namespace) -> int:
         force=args.force,
         vision=vision,
         vision_model=vision_model,
+        review=review,
     )
 
     ok = sum(1 for r in results if r.status == "ok")
@@ -151,6 +172,11 @@ async def _run_all(args: argparse.Namespace) -> int:
         f"完成: ok={ok} skipped={skipped} failed={len(failed)} "
         f"| 值得入库={worth}/{ok}"
     )
+    if review:
+        review_failed = [r for r in results if r.review_passed is False]
+        print(f"质检未通过: {len(review_failed)}/{ok}")
+        for r in review_failed:
+            print(f"  ⚠ {r.case_name}/{r.section_name}: {list(r.review_issues)}")
     for r in failed:
         print(f"  ✗ {r.case_name}/{r.section_name}: {r.error}")
     print(f"manifest: {OUTPUT_DIR / 'manifest.json'}")
@@ -164,7 +190,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="insurance-coach-md",
-        description="保险绩优案例知识沉淀智能体（M1：解析层）",
+        description="保险绩优案例知识沉淀智能体（解析 → 研判 → 提取 → 视觉 → 质检）",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -181,6 +207,9 @@ def main() -> int:
     p_build.add_argument(
         "--no-vision", action="store_true", help="跳过课件配图的视觉识别"
     )
+    p_build.add_argument(
+        "--review", action="store_true", help="对整理稿做质检（规范性/信息保真）"
+    )
     p_build.set_defaults(func=_cmd_build)
 
     p_run = sub.add_parser("run", help="全库批处理（研判 + 提取 + manifest）")
@@ -195,6 +224,9 @@ def main() -> int:
     p_run.add_argument("--limit", type=int, default=0, help="只处理前 N 个单元（调试用）")
     p_run.add_argument(
         "--no-vision", action="store_true", help="跳过课件配图的视觉识别"
+    )
+    p_run.add_argument(
+        "--review", action="store_true", help="对每节整理稿做质检并汇总到 manifest"
     )
     p_run.set_defaults(func=_cmd_run)
 

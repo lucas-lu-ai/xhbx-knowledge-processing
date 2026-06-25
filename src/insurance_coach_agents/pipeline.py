@@ -16,6 +16,7 @@ from .agents import (
     AssessorAgent,
     ExtractorAgent,
     ImageDescriber,
+    ReviewerAgent,
     enrich_section_with_vision,
 )
 from .config import OUTPUT_DIR
@@ -43,6 +44,9 @@ class SectionResult:
     reason: str = ""
     markdown_path: str | None = None
     error: str | None = None
+    review_passed: bool | None = None
+    review_score: float | None = None
+    review_issues: tuple[str, ...] = ()
 
 
 async def _process_group(
@@ -53,6 +57,7 @@ async def _process_group(
     force: bool,
     output_dir: Path,
     describer: ImageDescriber | None,
+    reviewer: ReviewerAgent | None,
 ) -> SectionResult:
     base = dict(
         case_name=group.case_name,
@@ -83,6 +88,7 @@ async def _process_group(
                         + "\n\n"
                         + vision_block,
                     )
+            review = await reviewer.review(section, doc) if reviewer else None
             result = write_section_output(section, assessment, doc, output_dir)
             return SectionResult(
                 **base,
@@ -92,6 +98,9 @@ async def _process_group(
                 topics=tuple(assessment.topics),
                 reason=assessment.reason,
                 markdown_path=str(result.markdown_path),
+                review_passed=review.passed if review else None,
+                review_score=review.score if review else None,
+                review_issues=tuple(review.issues) if review else (),
             )
         except Exception as exc:  # noqa: BLE001 - 单节失败隔离
             return SectionResult(**base, status="failed", error=repr(exc))
@@ -104,6 +113,7 @@ def _build_manifest(results: list[SectionResult]) -> dict:
         "skipped": sum(1 for r in results if r.status == "skipped"),
         "failed": sum(1 for r in results if r.status == "failed"),
         "worth_storing": sum(1 for r in results if r.worth_storing),
+        "review_failed": sum(1 for r in results if r.review_passed is False),
     }
     return {"summary": summary, "sections": [asdict(r) for r in results]}
 
@@ -130,6 +140,7 @@ async def run_pipeline(
     output_dir: Path = OUTPUT_DIR,
     vision: bool = True,
     vision_model: OpenAIChatModel | None = None,
+    review: bool = False,
 ) -> list[SectionResult]:
     """对一批知识单元并发执行研判 + 提取 +（可选）视觉增强 + 落盘，并写出 manifest。
 
@@ -146,11 +157,19 @@ async def run_pipeline(
         if vision
         else None
     )
+    reviewer = ReviewerAgent(model) if review else None
     semaphore = asyncio.Semaphore(concurrency)
 
     tasks = [
         _process_group(
-            group, assessor, extractor, semaphore, force, output_dir, describer
+            group,
+            assessor,
+            extractor,
+            semaphore,
+            force,
+            output_dir,
+            describer,
+            reviewer,
         )
         for group in groups
     ]

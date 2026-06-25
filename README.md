@@ -51,17 +51,22 @@ uv run insurance-coach-md stats
 # 解析并预览单个节（不调用 LLM）
 uv run insurance-coach-md show "<案例>/<节>" --preview 400
 
-# 研判 + 提取单个节并落盘（含视觉；--no-vision 跳过配图识别）
+# 研判 + 提取单个节并落盘（含视觉；--no-vision 跳过配图识别，--review 加质检）
 uv run insurance-coach-md build "<案例>/<节>"
 uv run insurance-coach-md build "<案例>/<节>" --no-vision
+uv run insurance-coach-md build "<案例>/<节>" --review
 
-# 全库批处理（分组 → 研判 → 提取 →（可选）视觉 → 落盘 + manifest）
+# 全库批处理（分组 → 研判 → 提取 →（可选）视觉 →（可选）质检 → 落盘 + manifest）
 uv run insurance-coach-md run --concurrency 4
 uv run insurance-coach-md run --limit 5            # 只跑前 5 个单元（调试）
 uv run insurance-coach-md run --force              # 忽略增量，强制重跑
 uv run insurance-coach-md run --no-vision          # 关闭视觉识别
+uv run insurance-coach-md run --review             # 每节做质检并汇总到 manifest
 uv run insurance-coach-md run --grouping single-file   # 单文件=单元（拍平数据兜底）
 ```
+
+> 视觉识别支持 pptx 与 pdf 内嵌图片；质检（`--review`）会审计整理稿的 Markdown 规范性、
+> 信息保真（无杜撰/无遗漏）与有无加工旁白，结果写入 `manifest.json`。
 
 ## 产物
 

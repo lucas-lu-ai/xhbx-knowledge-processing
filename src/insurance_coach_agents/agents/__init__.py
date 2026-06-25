@@ -9,12 +9,14 @@ from .assessor import AssessorAgent
 from .enrich import enrich_section_with_vision
 from .extractor import ExtractorAgent
 from .factory import build_chat_model, build_vision_model, response_text
+from .reviewer import ReviewerAgent
 from .vision import ImageDescriber
 
 __all__ = [
     "AssessorAgent",
     "ExtractorAgent",
     "ImageDescriber",
+    "ReviewerAgent",
     "build_chat_model",
     "build_vision_model",
     "enrich_section_with_vision",

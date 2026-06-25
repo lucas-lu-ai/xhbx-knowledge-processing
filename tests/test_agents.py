@@ -9,7 +9,11 @@ from __future__ import annotations
 import asyncio
 import json
 
-from insurance_coach_agents.agents import AssessorAgent, ExtractorAgent
+from insurance_coach_agents.agents import (
+    AssessorAgent,
+    ExtractorAgent,
+    ReviewerAgent,
+)
 from insurance_coach_agents.agents.factory import (
     render_section_material,
     response_text,
@@ -20,6 +24,7 @@ from insurance_coach_agents.models import (
     FileType,
     ParsedFile,
     RawSection,
+    ReviewResult,
     ServesRating,
 )
 from insurance_coach_agents.output_writer import write_section_output
@@ -114,6 +119,43 @@ def test_extractor_falls_back_to_section_name_without_h1():
     model = _FakeModel(content_blocks=blocks)
     doc = asyncio.run(ExtractorAgent(model).extract(_section()))
     assert doc.title == "第1节"
+
+
+def test_reviewer_returns_structured_review():
+    model = _FakeModel(
+        structured={
+            "passed": False,
+            "heading_ok": True,
+            "fidelity_ok": False,
+            "no_meta_leak": True,
+            "issues": ["遗漏了第二步面谈话术原文"],
+            "score": 0.5,
+        }
+    )
+    doc = ExtractedDoc(title="标题", body_markdown="# 标题\n正文")
+    review = asyncio.run(ReviewerAgent(model).review(_section(), doc))
+    assert isinstance(review, ReviewResult)
+    assert review.passed is False
+    assert review.fidelity_ok is False
+    assert review.issues == ["遗漏了第二步面谈话术原文"]
+    assert review.score == 0.5
+
+
+def test_review_issues_coerces_json_string_to_list():
+    # qwen 结构化输出偶尔把 list 字段返回成 JSON 字符串，validator 应转回 list
+    model = _FakeModel(
+        structured={
+            "passed": False,
+            "heading_ok": False,
+            "fidelity_ok": True,
+            "no_meta_leak": True,
+            "issues": '["缺少一级标题", "层级跳级"]',
+            "score": 0.6,
+        }
+    )
+    doc = ExtractedDoc(title="t", body_markdown="## 无 h1")
+    review = asyncio.run(ReviewerAgent(model).review(_section(), doc))
+    assert review.issues == ["缺少一级标题", "层级跳级"]
 
 
 def test_write_section_output_creates_md_and_meta(tmp_path):

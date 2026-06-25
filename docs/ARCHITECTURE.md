@@ -102,8 +102,10 @@ model = OpenAIChatModel(credential=cred, model="qwen3.7-max",
    ② ExtractorAgent  提取：以docx为骨架融合pptx/txt → 标准 md；cleanup 清洗元注释/列表符/围栏
             ▼
    ③ 视觉增强（可选，enrich + ImageDescriber，走 gpt-4o）
-      pptx抽图 → sha256去重 + 尺寸预过滤 → 视觉识别（装饰图/碎片丢弃）
+      pptx/pdf抽图 → sha256去重 + 尺寸预过滤 → 视觉识别（装饰图/碎片丢弃）
       → 信息图转写为 md，追加到正文末尾「## 课件图片信息（视觉识别）」；按 sha256 缓存
+            ▼
+   ④ 质检（可选 --review，ReviewerAgent）：对最终稿审计规范性/信息保真/无旁白 → ReviewResult
             ▼
    output_writer（原子写入：先 .tmp 再 rename）
    → output/<案例>/<节>.md  +  <节>.meta.json
@@ -129,10 +131,10 @@ model = OpenAIChatModel(credential=cred, model="qwen3.7-max",
 | 解析层（parsers） | 一组文件 | `RawSection` | 否 |
 | ① AssessorAgent | `RawSection` | `Assessment`（入库与否、理由、标签、四维评级、评分） | 是 |
 | ② ExtractorAgent | `RawSection` | `ExtractedDoc`（标准 md 正文，经 cleanup） | 是 |
-| ③ 视觉增强（enrich + ImageDescriber） | 节内 pptx 配图 | 追加到正文的视觉章节（装饰图/碎片自动丢弃） | 是（视觉模型） |
+| ③ 视觉增强（enrich + ImageDescriber） | 节内 pptx/pdf 配图 | 追加到正文的视觉章节（装饰图/碎片自动丢弃） | 是（视觉模型） |
+| ④ ReviewerAgent（可选 `--review`） | `ExtractedDoc` + `RawSection` | `ReviewResult`（规范性/保真/无旁白 + issues + score），汇总进 manifest | 是 |
 | output_writer | 上述结果 | `<节>.md` + `<节>.meta.json`（原子写） | 否 |
 | pipeline | 全部结果 | `manifest.json` | 否 |
-| ④ ReviewerAgent（待做） | `ExtractedDoc` + `RawSection` | 质检报告（规范性/信息保真） | 是 |
 
 ## 5. 目录结构
 
@@ -147,10 +149,10 @@ xhbx/
 ├── src/insurance_coach_agents/
 │   ├── cli.py                    # 入口：stats / show / build / run
 │   ├── config.py                 # 路径、文件类型映射、模型环境配置
-│   ├── models.py                 # ParsedFile/RawSection/Assessment/ServesRating/ExtractedDoc
+│   ├── models.py                 # ParsedFile/RawSection/Assessment/ServesRating/ExtractedDoc/ReviewResult
 │   ├── parsers/
 │   │   ├── docx_parser.py  pptx_parser.py  pdf_parser.py  txt_parser.py
-│   │   ├── image_extract.py      # pptx 抽图 + sha256 去重 + 尺寸预过滤
+│   │   ├── image_extract.py      # pptx/pdf 抽图 + sha256 去重 + 尺寸预过滤
 │   │   ├── section_loader.py     # 单节加载 + parse_file 分派
 │   │   └── grouping.py           # 目录/单文件分组策略 + load_group
 │   ├── agents/
@@ -159,6 +161,7 @@ xhbx/
 │   │   ├── extractor.py          # 提取
 │   │   ├── vision.py             # ImageDescriber：配图视觉识别 + 装饰/碎片过滤 + 缓存
 │   │   ├── enrich.py             # 视觉章节组装（方案 A：汇总到正文末尾）
+│   │   ├── reviewer.py           # ReviewerAgent：整理稿质检（规范性/保真/无旁白）
 │   │   ├── cleanup.py            # 产出清洗（元注释/列表符/残留符）
 │   │   └── prompts.py            # 中文 system prompt（含视觉）
 │   ├── output_writer.py          # 原子落盘 md + meta.json
@@ -171,7 +174,8 @@ xhbx/
 Markdown = YAML frontmatter（`case/section/title/topics/serves/value_score/worth_storing/sources`）
 + 标准化正文；开启视觉时，正文末尾追加 `## 课件图片信息（视觉识别）` 章节，逐条标注「第 N 页配图」。
 同名 `.meta.json` 存结构化元数据（含研判 `reason`、`section_dir` 溯源）；
-全局 `manifest.json` 汇总每节 `status/value_score/topics/reason`，供人工抽检。
+全局 `manifest.json` 汇总每节 `status/value_score/topics/reason`，供人工抽检；
+开启 `--review` 时附 `review_passed/review_score/review_issues` 与汇总 `review_failed`。
 视觉识别结果按图片 sha256 缓存于 `output/.image_cache/`（空文件=装饰图/无价值，可重跑复用）。
 
 ## 7. 实现里程碑
@@ -182,4 +186,4 @@ Markdown = YAML frontmatter（`case/section/title/topics/serves/value_score/wort
 | **M2** | 接入 OpenAI 风格模型（mixroute/qwen）+ Assessor + Extractor + 落盘 + CLI build | ✅ |
 | **M3** | 全库批处理（并发/增量/错误隔离）+ 分组策略 + manifest + 原子写入 + 产出清洗 | ✅ |
 | **M4a** | 视觉增强：pptx 配图 → 文字（独立视觉模型 gpt-4o）+ 装饰/碎片过滤 + sha256 缓存 + 降级 | ✅ |
-| **M4b** | Reviewer 质检（规范性/信息保真）+ PDF 图片抽取 | ⏳ |
+| **M4b** | Reviewer 质检（规范性/信息保真/无旁白，`--review`）+ PDF 图片抽取 | ✅ |

@@ -14,7 +14,7 @@ from pathlib import Path
 from agentscope.message import Base64Source, DataBlock, SystemMsg, TextBlock, UserMsg
 from agentscope.model import OpenAIChatModel
 
-from ..parsers.image_extract import PptxImage
+from ..parsers.image_extract import SourceImage
 from .factory import response_text
 from .prompts import VISION_SYSTEM_PROMPT
 
@@ -69,7 +69,7 @@ class ImageDescriber:
             return None
         return self._cache_dir / f"{sha256}.txt"
 
-    async def describe(self, image: PptxImage) -> str | None:
+    async def describe(self, image: SourceImage) -> str | None:
         """识别单张图片。
 
         返回值：
