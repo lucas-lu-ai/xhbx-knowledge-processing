@@ -60,13 +60,27 @@ model = OpenAIChatModel(credential=cred, model="qwen3.7-max",
 
 > 设计取舍：Assessor/Extractor 是**单轮 LLM 调用**，直接用 model 层而非 `Agent`(ReAct) 类，更省 token、更可控。
 
+### 3.1.1 视觉模型（独立于文本模型）
+
+课件配图识别走**多模态消息**：用 `DataBlock(type="data", source=Base64Source(media_type="image/png", data=...))`
+承载图片，`OpenAIChatFormatter` 会自动转成 OpenAI 的 `image_url`（`data:image/png;base64,...`）格式。
+
+> **实测结论**：`qwen3.7-max`（及 mixroute 上的整个 qwen 系列）**不支持图像输入**，传图会报
+> `400 Unexpected item type in content`。因此视觉识别走**独立的视觉模型**（默认 `gpt-4o`，
+> 已实测在本平台可用），文本研判/提取仍用 `qwen3.7-max`；二者共用同一 `api_key` 与 `base_url`。
+
+- **网络健壮性**：模型层设 `max_retries=5, retry_delay=2`（超时不能经 `client_kwargs` 传入，
+  该版本会把它透传给每次 `create()` 而报 `TypeError`）。
+- 单图识别失败**降级不中断**整条流水线，并打 `logging.warning`（避免"模型不支持视觉"被静默吞成"全是装饰图"）。
+
 ### 3.2 环境变量（来自 `.env`）
 
 | 变量 | 用途 | 示例 |
 |---|---|---|
 | `QWEN_API_KEY` | 第三方平台密钥 | （不入库） |
 | `QWEN_BASE_URL` | OpenAI 兼容端点 | `https://api.mixroute.ai/v1` |
-| `QWEN_MODEL_NAME` | 模型名 | `qwen3.7-max` |
+| `QWEN_MODEL_NAME` | 文本研判/提取模型 | `qwen3.7-max` |
+| `QWEN_VISION_MODEL_NAME` | 视觉识别模型（可选，缺省 `gpt-4o`） | `gpt-4o` |
 
 ## 4. 系统架构
 
@@ -86,6 +100,10 @@ model = OpenAIChatModel(credential=cred, model="qwen3.7-max",
    ① AssessorAgent   研判：能否入库？理由 + 主题标签 + 四维价值评级 + 评分（结构化输出）
             ▼
    ② ExtractorAgent  提取：以docx为骨架融合pptx/txt → 标准 md；cleanup 清洗元注释/列表符/围栏
+            ▼
+   ③ 视觉增强（可选，enrich + ImageDescriber，走 gpt-4o）
+      pptx抽图 → sha256去重 + 尺寸预过滤 → 视觉识别（装饰图/碎片丢弃）
+      → 信息图转写为 md，追加到正文末尾「## 课件图片信息（视觉识别）」；按 sha256 缓存
             ▼
    output_writer（原子写入：先 .tmp 再 rename）
    → output/<案例>/<节>.md  +  <节>.meta.json
@@ -111,9 +129,10 @@ model = OpenAIChatModel(credential=cred, model="qwen3.7-max",
 | 解析层（parsers） | 一组文件 | `RawSection` | 否 |
 | ① AssessorAgent | `RawSection` | `Assessment`（入库与否、理由、标签、四维评级、评分） | 是 |
 | ② ExtractorAgent | `RawSection` | `ExtractedDoc`（标准 md 正文，经 cleanup） | 是 |
+| ③ 视觉增强（enrich + ImageDescriber） | 节内 pptx 配图 | 追加到正文的视觉章节（装饰图/碎片自动丢弃） | 是（视觉模型） |
 | output_writer | 上述结果 | `<节>.md` + `<节>.meta.json`（原子写） | 否 |
 | pipeline | 全部结果 | `manifest.json` | 否 |
-| ③ ReviewerAgent（待做） | `ExtractedDoc` + `RawSection` | 质检报告（规范性/信息保真） | 是 |
+| ④ ReviewerAgent（待做） | `ExtractedDoc` + `RawSection` | 质检报告（规范性/信息保真） | 是 |
 
 ## 5. 目录结构
 
@@ -131,14 +150,17 @@ xhbx/
 │   ├── models.py                 # ParsedFile/RawSection/Assessment/ServesRating/ExtractedDoc
 │   ├── parsers/
 │   │   ├── docx_parser.py  pptx_parser.py  pdf_parser.py  txt_parser.py
+│   │   ├── image_extract.py      # pptx 抽图 + sha256 去重 + 尺寸预过滤
 │   │   ├── section_loader.py     # 单节加载 + parse_file 分派
 │   │   └── grouping.py           # 目录/单文件分组策略 + load_group
 │   ├── agents/
-│   │   ├── factory.py            # 构造 OpenAIChatModel + 响应/素材辅助
+│   │   ├── factory.py            # 构造文本/视觉 OpenAIChatModel + 响应/素材辅助
 │   │   ├── assessor.py           # 研判
 │   │   ├── extractor.py          # 提取
+│   │   ├── vision.py             # ImageDescriber：配图视觉识别 + 装饰/碎片过滤 + 缓存
+│   │   ├── enrich.py             # 视觉章节组装（方案 A：汇总到正文末尾）
 │   │   ├── cleanup.py            # 产出清洗（元注释/列表符/残留符）
-│   │   └── prompts.py            # 中文 system prompt
+│   │   └── prompts.py            # 中文 system prompt（含视觉）
 │   ├── output_writer.py          # 原子落盘 md + meta.json
 │   └── pipeline.py               # 批处理编排 + manifest
 └── tests/                        # 解析/智能体/清洗/编排单测（fake 模型，不烧 API）
@@ -147,8 +169,10 @@ xhbx/
 ## 6. 产物格式
 
 Markdown = YAML frontmatter（`case/section/title/topics/serves/value_score/worth_storing/sources`）
-+ 标准化正文；同名 `.meta.json` 存结构化元数据（含研判 `reason`、`section_dir` 溯源）；
++ 标准化正文；开启视觉时，正文末尾追加 `## 课件图片信息（视觉识别）` 章节，逐条标注「第 N 页配图」。
+同名 `.meta.json` 存结构化元数据（含研判 `reason`、`section_dir` 溯源）；
 全局 `manifest.json` 汇总每节 `status/value_score/topics/reason`，供人工抽检。
+视觉识别结果按图片 sha256 缓存于 `output/.image_cache/`（空文件=装饰图/无价值，可重跑复用）。
 
 ## 7. 实现里程碑
 
@@ -157,4 +181,5 @@ Markdown = YAML frontmatter（`case/section/title/topics/serves/value_score/wort
 | **M1** | 解析层 + 数据契约 + CLI（stats/show），真实数据跑通"节 → RawSection" | ✅ |
 | **M2** | 接入 OpenAI 风格模型（mixroute/qwen）+ Assessor + Extractor + 落盘 + CLI build | ✅ |
 | **M3** | 全库批处理（并发/增量/错误隔离）+ 分组策略 + manifest + 原子写入 + 产出清洗 | ✅ |
-| **M4** | 视觉增强（PPT/扫描 PDF 图片 → 文字，按需 + 缓存）+ Reviewer 质检 | ⏳ |
+| **M4a** | 视觉增强：pptx 配图 → 文字（独立视觉模型 gpt-4o）+ 装饰/碎片过滤 + sha256 缓存 + 降级 | ✅ |
+| **M4b** | Reviewer 质检（规范性/信息保真）+ PDF 图片抽取 | ⏳ |

@@ -21,6 +21,13 @@ def _safe_name(name: str) -> str:
     return _UNSAFE_CHARS.sub("_", name).strip()
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """原子写文本：先写 ``.tmp`` 再 rename，避免中断/并发留下空或半截文件。"""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
 def expected_markdown_path(
     case_name: str, section_name: str, output_dir: Path = OUTPUT_DIR
 ) -> Path:
@@ -93,10 +100,8 @@ def write_section_output(
 
     meta = _build_metadata(section, assessment, doc)
     frontmatter = _render_frontmatter(meta)
-    markdown_path.write_text(
-        f"{frontmatter}\n\n{doc.body_markdown}\n", encoding="utf-8"
-    )
-    meta_path.write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    _atomic_write_text(markdown_path, f"{frontmatter}\n\n{doc.body_markdown}\n")
+    _atomic_write_text(
+        meta_path, json.dumps(meta, ensure_ascii=False, indent=2)
     )
     return WriteResult(markdown_path=markdown_path, meta_path=meta_path)

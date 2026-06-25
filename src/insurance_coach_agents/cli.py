@@ -14,12 +14,20 @@ import asyncio
 from collections import Counter
 from pathlib import Path
 
-from .agents import AssessorAgent, ExtractorAgent, build_chat_model
+from .agents import (
+    AssessorAgent,
+    ExtractorAgent,
+    ImageDescriber,
+    build_chat_model,
+    build_vision_model,
+    enrich_section_with_vision,
+)
 from .config import CASES_DIR, OUTPUT_DIR
+from .models import ExtractedDoc
 from .output_writer import write_section_output
 from .parsers.grouping import group_by_directory, group_by_single_file
 from .parsers.section_loader import iter_section_dirs, load_section
-from .pipeline import run_pipeline
+from .pipeline import IMAGE_CACHE_DIRNAME, run_pipeline
 
 
 def _cmd_stats(_: argparse.Namespace) -> int:
@@ -64,8 +72,9 @@ def _cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
-async def _build_section(section_rel: str) -> int:
-    section = load_section((CASES_DIR / section_rel).resolve())
+async def _build_section(section_rel: str, vision: bool) -> int:
+    section_dir = (CASES_DIR / section_rel).resolve()
+    section = load_section(section_dir)
     model = build_chat_model()
     assessor = AssessorAgent(model)
     extractor = ExtractorAgent(model)
@@ -80,13 +89,31 @@ async def _build_section(section_rel: str) -> int:
 
     print("提取中...")
     doc = await extractor.extract(section)
+
+    if vision:
+        print("视觉识别课件配图中...")
+        vision_model = build_vision_model()
+        describer = ImageDescriber(
+            vision_model, cache_dir=OUTPUT_DIR / IMAGE_CACHE_DIRNAME
+        )
+        pptx_paths = sorted(section_dir.glob("*.pptx"))
+        vision_block = await enrich_section_with_vision(pptx_paths, describer)
+        if vision_block:
+            doc = ExtractedDoc(
+                title=doc.title,
+                body_markdown=doc.body_markdown.rstrip() + "\n\n" + vision_block,
+            )
+            print(f"  已追加视觉章节（{len(vision_block)} 字）")
+        else:
+            print("  无可入库的配图信息")
+
     result = write_section_output(section, assessment, doc)
     print(f"已写出:\n  {result.markdown_path}\n  {result.meta_path}")
     return 0
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
-    return asyncio.run(_build_section(args.section))
+    return asyncio.run(_build_section(args.section, vision=not args.no_vision))
 
 
 async def _run_all(args: argparse.Namespace) -> int:
@@ -100,13 +127,20 @@ async def _run_all(args: argparse.Namespace) -> int:
         print(f"未在 {CASES_DIR} 下发现任何素材。")
         return 1
 
+    vision = not args.no_vision
     print(
         f"待处理知识单元: {len(groups)} | 分组={args.grouping} "
-        f"| 并发={args.concurrency} | force={args.force}"
+        f"| 并发={args.concurrency} | force={args.force} | 视觉={vision}"
     )
     model = build_chat_model()
+    vision_model = build_vision_model() if vision else None
     results = await run_pipeline(
-        groups, model, concurrency=args.concurrency, force=args.force
+        groups,
+        model,
+        concurrency=args.concurrency,
+        force=args.force,
+        vision=vision,
+        vision_model=vision_model,
     )
 
     ok = sum(1 for r in results if r.status == "ok")
@@ -144,6 +178,9 @@ def main() -> int:
 
     p_build = sub.add_parser("build", help="研判 + 提取单个节并落盘")
     p_build.add_argument("section", help="相对绩优案例根的节目录路径")
+    p_build.add_argument(
+        "--no-vision", action="store_true", help="跳过课件配图的视觉识别"
+    )
     p_build.set_defaults(func=_cmd_build)
 
     p_run = sub.add_parser("run", help="全库批处理（研判 + 提取 + manifest）")
@@ -156,6 +193,9 @@ def main() -> int:
     p_run.add_argument("--concurrency", type=int, default=4, help="并发数")
     p_run.add_argument("--force", action="store_true", help="忽略增量，强制重跑")
     p_run.add_argument("--limit", type=int, default=0, help="只处理前 N 个单元（调试用）")
+    p_run.add_argument(
+        "--no-vision", action="store_true", help="跳过课件配图的视觉识别"
+    )
     p_run.set_defaults(func=_cmd_run)
 
     args = parser.parse_args()

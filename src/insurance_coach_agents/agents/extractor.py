@@ -38,7 +38,6 @@ class ExtractorAgent:
             UserMsg(name="user", content=material),
         ]
         response = await self._model(messages)
-        response = await self._model(messages)
         body = clean_markdown_body(response_text(response))
         title = _extract_title(body, fallback=section.section_name)
         return ExtractedDoc(title=title, body_markdown=body)

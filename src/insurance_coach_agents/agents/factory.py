@@ -13,6 +13,13 @@ from agentscope.model import ChatResponse, OpenAIChatModel
 from ..config import ModelSettings, load_model_settings
 from ..models import FileType, RawSection
 
+# 网络健壮性：视觉识别会发起大量逐图请求，第三方平台偶发 APIConnectionError，
+# 故放大重试次数与退避间隔。注意：超时不可通过 client_kwargs 传入——该 AgentScope
+# 版本会把 client_kwargs 透传给每次 completions.create()，create() 不接受 timeout
+# 会抛 TypeError，故此处只调重试参数。
+_MAX_RETRIES = 5
+_RETRY_DELAY = 2.0
+
 _TYPE_LABEL = {
     FileType.DOCX: "docx 讲义（人工整理，主干）",
     FileType.PPTX: "pptx 课件（框架要点）",
@@ -21,22 +28,38 @@ _TYPE_LABEL = {
 }
 
 
-def build_chat_model(settings: ModelSettings | None = None) -> OpenAIChatModel:
-    """构造指向第三方平台的 ``OpenAIChatModel``。
+def _build_model(model_name: str, settings: ModelSettings) -> OpenAIChatModel:
+    """用指定模型名构造指向第三方平台的 ``OpenAIChatModel``。
 
     使用 OpenAI 风格的凭证与 base_url（而非 DashScope 类），以适配 mixroute.ai。
     ``stream=False`` 以便一次性拿到完整响应，简化下游处理。
     """
-    settings = settings or load_model_settings()
     credential = OpenAICredential(
         api_key=settings.api_key, base_url=settings.base_url
     )
     return OpenAIChatModel(
         credential=credential,
-        model=settings.model_name,
+        model=model_name,
         formatter=OpenAIChatFormatter(),
         stream=False,
+        max_retries=_MAX_RETRIES,
+        retry_delay=_RETRY_DELAY,
     )
+
+
+def build_chat_model(settings: ModelSettings | None = None) -> OpenAIChatModel:
+    """构造文本研判/抽取用的模型（``model_name``，如 qwen3.7-max）。"""
+    settings = settings or load_model_settings()
+    return _build_model(settings.model_name, settings)
+
+
+def build_vision_model(settings: ModelSettings | None = None) -> OpenAIChatModel:
+    """构造课件配图识别用的视觉模型（``vision_model_name``，如 gpt-4o）。
+
+    qwen 系列不支持图像输入，故视觉识别走独立的多模态模型。
+    """
+    settings = settings or load_model_settings()
+    return _build_model(settings.vision_model_name, settings)
 
 
 def response_text(response: ChatResponse) -> str:

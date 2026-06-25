@@ -35,19 +35,29 @@ MEDIA_EXTENSIONS: frozenset[str] = frozenset(
     {".mp3", ".mp4", ".mov", ".m4a", ".ts", ".wav", ".avi"}
 )
 
+# 默认视觉识别模型：文本研判/抽取用的 qwen 系列不支持图像输入，
+# 课件配图识别需走支持视觉的模型（经实测 gpt-4o 在本平台可用）。
+DEFAULT_VISION_MODEL = "gpt-4o"
+
 
 @dataclass(frozen=True)
 class ModelSettings:
-    """第三方 OpenAI 兼容平台的模型设置（来自环境变量）。"""
+    """第三方 OpenAI 兼容平台的模型设置（来自环境变量）。
+
+    ``model_name`` 用于文本研判/抽取；``vision_model_name`` 用于课件配图视觉识别，
+    二者共用同一套 api_key 与 base_url。
+    """
 
     api_key: str
     base_url: str
     model_name: str
+    vision_model_name: str = DEFAULT_VISION_MODEL
 
     def __repr__(self) -> str:  # 避免在日志/异常中泄露密钥
         return (
             f"ModelSettings(base_url={self.base_url!r}, "
-            f"model_name={self.model_name!r}, api_key=***)"
+            f"model_name={self.model_name!r}, "
+            f"vision_model_name={self.vision_model_name!r}, api_key=***)"
         )
 
 
@@ -61,6 +71,10 @@ def load_model_settings(dotenv_path: Path | None = None) -> ModelSettings:
     api_key = os.environ.get("QWEN_API_KEY", "").strip()
     base_url = os.environ.get("QWEN_BASE_URL", "").strip()
     model_name = os.environ.get("QWEN_MODEL_NAME", "").strip()
+    # 视觉模型可选；缺省回退到 DEFAULT_VISION_MODEL（gpt-4o）。
+    vision_model_name = (
+        os.environ.get("QWEN_VISION_MODEL_NAME", "").strip() or DEFAULT_VISION_MODEL
+    )
 
     missing = [
         name
@@ -77,4 +91,9 @@ def load_model_settings(dotenv_path: Path | None = None) -> ModelSettings:
             f"请参考 .env.example 在项目根创建 .env 文件。"
         )
 
-    return ModelSettings(api_key=api_key, base_url=base_url, model_name=model_name)
+    return ModelSettings(
+        api_key=api_key,
+        base_url=base_url,
+        model_name=model_name,
+        vision_model_name=vision_model_name,
+    )

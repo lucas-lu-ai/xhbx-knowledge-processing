@@ -6,12 +6,17 @@ M2 实现 ``AssessorAgent``（研判 + 理由）与 ``ExtractorAgent``（→ 标
 """
 
 from .assessor import AssessorAgent
+from .enrich import enrich_section_with_vision
 from .extractor import ExtractorAgent
-from .factory import build_chat_model, response_text
+from .factory import build_chat_model, build_vision_model, response_text
+from .vision import ImageDescriber
 
 __all__ = [
     "AssessorAgent",
     "ExtractorAgent",
+    "ImageDescriber",
     "build_chat_model",
+    "build_vision_model",
+    "enrich_section_with_vision",
     "response_text",
 ]
