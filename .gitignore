@@ -1,0 +1,30 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+
+# Pipeline output
+output/
+
+# 客户原始素材（含 GB 级音视频，不入库）
+数据/
+
+# Test cache
+.pytest_cache/
