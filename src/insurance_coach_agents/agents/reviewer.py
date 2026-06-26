@@ -10,7 +10,7 @@ from agentscope.message import SystemMsg, UserMsg
 from agentscope.model import OpenAIChatModel
 
 from ..models import ExtractedDoc, RawSection, ReviewResult
-from .factory import render_section_material
+from .factory import STRUCTURED_TOOL_CHOICE, render_section_material
 from .prompts import REVIEWER_SYSTEM_PROMPT
 
 
@@ -34,6 +34,8 @@ class ReviewerAgent:
             UserMsg(name="user", content=user),
         ]
         response = await self._model.generate_structured_output(
-            messages, structured_model=ReviewResult
+            messages,
+            structured_model=ReviewResult,
+            tool_choice=STRUCTURED_TOOL_CHOICE,
         )
         return ReviewResult(**dict(response.content))

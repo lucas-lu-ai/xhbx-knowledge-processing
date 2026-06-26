@@ -1,6 +1,7 @@
-"""产物落盘：把研判 + 提取结果写为 Markdown（含 frontmatter）与 meta.json。
+"""产物落盘：把研判 + 提取结果写为 Markdown、meta.json 与 provenance.json。
 
-Markdown 的 YAML frontmatter 与同名 meta.json 元数据保持一致，供下游向量化与溯源。
+Markdown 的 YAML frontmatter 与同名 meta.json 保持单元级元数据一致；
+provenance.json 保存块级来源引用，供下游向量化与人工核查。
 """
 
 from __future__ import annotations
@@ -11,7 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import OUTPUT_DIR
-from .models import Assessment, ExtractedDoc, RawSection
+from .models import Assessment, ExtractedDoc, RawSection, ReviewResult
+from .provenance import build_provenance
 
 _UNSAFE_CHARS = re.compile(r'[\\/:*?"<>|]')
 
@@ -46,6 +48,8 @@ class WriteResult:
 
     markdown_path: Path
     meta_path: Path
+    provenance_path: Path
+    review_path: Path | None = None
 
 
 def _build_metadata(
@@ -84,24 +88,70 @@ def _render_frontmatter(meta: dict) -> str:
     return "\n".join(lines)
 
 
+def _yes_no(value: bool) -> str:
+    return "是" if value else "否"
+
+
+def _pass_fail(value: bool) -> str:
+    return "通过" if value else "未通过"
+
+
+def _render_review_markdown(section: RawSection, review: ReviewResult) -> str:
+    """把结构化质检结论渲染成人工可读的 Markdown 报告。"""
+    issues = review.issues or ["无"]
+    lines = [
+        f"# {section.section_name} - 质检报告",
+        "",
+        "## 结论",
+        f"- 是否通过: {_yes_no(review.passed)}",
+        f"- 综合评分: {review.score:.2f}",
+        "",
+        "## 检查项",
+        f"- Markdown 规范性: {_pass_fail(review.heading_ok)}",
+        f"- 信息保真: {_pass_fail(review.fidelity_ok)}",
+        f"- 无加工旁白: {_pass_fail(review.no_meta_leak)}",
+        "",
+        "## 问题列表",
+    ]
+    lines.extend(f"- {issue}" for issue in issues)
+    return "\n".join(lines) + "\n"
+
+
 def write_section_output(
     section: RawSection,
     assessment: Assessment,
     doc: ExtractedDoc,
     output_dir: Path = OUTPUT_DIR,
+    review: ReviewResult | None = None,
 ) -> WriteResult:
-    """把单个节的产物写入 ``output/<案例>/<节>.md`` 与 ``<节>.meta.json``。"""
+    """把单个节的产物写入 Markdown、meta.json 与可选质检报告。"""
     case_dir = output_dir / _safe_name(section.case_name)
     case_dir.mkdir(parents=True, exist_ok=True)
 
     stem = _safe_name(section.section_name)
     markdown_path = case_dir / f"{stem}.md"
     meta_path = case_dir / f"{stem}.meta.json"
+    provenance_path = case_dir / f"{stem}.provenance.json"
+    review_path = case_dir / f"{stem}.review.md" if review else None
 
     meta = _build_metadata(section, assessment, doc)
     frontmatter = _render_frontmatter(meta)
+    provenance = build_provenance(
+        section, doc, body_start_line=len(frontmatter.splitlines()) + 2
+    )
     _atomic_write_text(markdown_path, f"{frontmatter}\n\n{doc.body_markdown}\n")
     _atomic_write_text(
         meta_path, json.dumps(meta, ensure_ascii=False, indent=2)
     )
-    return WriteResult(markdown_path=markdown_path, meta_path=meta_path)
+    _atomic_write_text(
+        provenance_path,
+        json.dumps(provenance, ensure_ascii=False, indent=2),
+    )
+    if review and review_path:
+        _atomic_write_text(review_path, _render_review_markdown(section, review))
+    return WriteResult(
+        markdown_path=markdown_path,
+        meta_path=meta_path,
+        provenance_path=provenance_path,
+        review_path=review_path,
+    )

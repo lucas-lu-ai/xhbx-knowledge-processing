@@ -9,9 +9,11 @@ from __future__ import annotations
 from agentscope.credential import OpenAICredential
 from agentscope.formatter import OpenAIChatFormatter
 from agentscope.model import ChatResponse, OpenAIChatModel
+from agentscope.tool import ToolChoice
 
 from ..config import ModelSettings, load_model_settings
 from ..models import FileType, RawSection
+from .structured_model import RobustOpenAIChatModel
 
 # 网络健壮性：视觉识别会发起大量逐图请求，第三方平台偶发 APIConnectionError，
 # 故放大重试次数与退避间隔。注意：超时不可通过 client_kwargs 传入——该 AgentScope
@@ -19,6 +21,12 @@ from ..models import FileType, RawSection
 # 会抛 TypeError，故此处只调重试参数。
 _MAX_RETRIES = 5
 _RETRY_DELAY = 2.0
+
+# 结构化输出的 tool_choice：本平台的文本模型（qwen / deepseek 等）均为 thinking 模式，
+# 不支持强制 tool_choice。AgentScope 默认会强制模型调用工具，触发 400 后再自动降级到
+# auto 重试——等于每次结构化调用都白发一次注定失败的请求。直接用 auto 跳过首发失败，
+# 既消除告警又省一次往返；模型仍由注入的 system-reminder 提示词引导调用工具。
+STRUCTURED_TOOL_CHOICE = ToolChoice(mode="auto")
 
 _TYPE_LABEL = {
     FileType.DOCX: "docx 讲义（人工整理，主干）",
@@ -37,7 +45,9 @@ def _build_model(model_name: str, settings: ModelSettings) -> OpenAIChatModel:
     credential = OpenAICredential(
         api_key=settings.api_key, base_url=settings.base_url
     )
-    return OpenAIChatModel(
+    # 用 RobustOpenAIChatModel：对 thinking 模型的结构化输出做容错（固定 auto +
+    # 解包单键嵌套 + 校验重试）。普通文本/视觉调用行为与父类一致。
+    return RobustOpenAIChatModel(
         credential=credential,
         model=model_name,
         formatter=OpenAIChatFormatter(),

@@ -12,6 +12,7 @@ from pptx.util import Inches
 
 from insurance_coach_agents.agents.enrich import enrich_section_with_vision
 from insurance_coach_agents.agents.vision import ImageDescriber
+from insurance_coach_agents.models import FileType, ParsedFile, RawSection
 from insurance_coach_agents.parsers.image_extract import (
     SourceImage,
     extract_images,
@@ -220,30 +221,64 @@ class _StubDescriber:
         return f"第{image.page_index}页转写内容"
 
 
-def test_enrich_builds_section_with_page_labels(tmp_path):
+def _section_with_pptx(text: str) -> RawSection:
+    return RawSection(
+        case_name="案例X",
+        section_name="第1节",
+        section_dir="案例X/第1节",
+        files=(
+            ParsedFile(file_type=FileType.PPTX, filename="deck.pptx", text=text),
+        ),
+    )
+
+
+def test_enrich_binds_image_content_to_matching_page(tmp_path):
     path = tmp_path / "deck.pptx"
     _make_pptx(path, [_png(_BIG_RED), _png(_BIG_BLUE)])  # 第1页信息图，第2页装饰图
     stub = _StubDescriber(decorative_blob=_png(_BIG_BLUE))
+    section = _section_with_pptx("## 第 1 页\n客户需求\n\n## 第 2 页\n产品方案")
 
-    out = asyncio.run(enrich_section_with_vision([path], stub))
+    enriched = asyncio.run(enrich_section_with_vision(section, [path], stub))
+    text = enriched.files[0].text
 
-    assert "## 课件图片信息（视觉识别）" in out
-    assert "（第 1 页配图）" in out
-    assert "第1页转写内容" in out
-    assert "第 2 页" not in out  # 装饰图被略过
+    assert "### 本页配图内容" in text
+    assert "第1页转写内容" in text
+    assert text.index("客户需求") < text.index("第1页转写内容")
+    assert text.index("第1页转写内容") < text.index("## 第 2 页")
+    assert "第2页转写内容" not in text  # 装饰图被略过
 
 
-def test_enrich_returns_empty_when_no_pptx(tmp_path):
-    out = asyncio.run(
-        enrich_section_with_vision([tmp_path / "讲义.docx"], _StubDescriber(b""))
+def test_enrich_creates_page_block_for_image_only_page(tmp_path):
+    path = tmp_path / "deck.pptx"
+    _make_pptx(path, [_png(_BIG_RED)])
+    stub = _StubDescriber(decorative_blob=b"")
+    section = _section_with_pptx("")
+
+    enriched = asyncio.run(enrich_section_with_vision(section, [path], stub))
+
+    assert enriched.files[0].text == (
+        "## 第 1 页\n\n### 本页配图内容\n第1页转写内容"
     )
-    assert out == ""
 
 
-def test_enrich_returns_empty_when_all_decorative(tmp_path):
+def test_enrich_keeps_section_when_no_supported_sources(tmp_path):
+    section = RawSection(
+        case_name="案例X",
+        section_name="第1节",
+        section_dir="案例X/第1节",
+        files=(ParsedFile(file_type=FileType.DOCX, filename="讲义.docx", text="# 标题"),),
+    )
+    out = asyncio.run(
+        enrich_section_with_vision(section, [tmp_path / "讲义.docx"], _StubDescriber(b""))
+    )
+    assert out == section
+
+
+def test_enrich_keeps_text_when_all_decorative(tmp_path):
     path = tmp_path / "deco.pptx"
     _make_pptx(path, [_png(_BIG_BLUE)])
     stub = _StubDescriber(decorative_blob=_png(_BIG_BLUE))
+    section = _section_with_pptx("## 第 1 页\n原文")
 
-    out = asyncio.run(enrich_section_with_vision([path], stub))
-    assert out == ""
+    out = asyncio.run(enrich_section_with_vision(section, [path], stub))
+    assert out.files[0].text == "## 第 1 页\n原文"

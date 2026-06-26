@@ -16,11 +16,11 @@ from .agents import (
     AssessorAgent,
     ExtractorAgent,
     ImageDescriber,
+    ReviserAgent,
     ReviewerAgent,
     enrich_section_with_vision,
 )
 from .config import OUTPUT_DIR
-from .models import ExtractedDoc
 from .output_writer import expected_markdown_path, write_section_output
 from .parsers.grouping import SourceGroup, load_group
 
@@ -58,6 +58,7 @@ async def _process_group(
     output_dir: Path,
     describer: ImageDescriber | None,
     reviewer: ReviewerAgent | None,
+    reviser: ReviserAgent | None,
 ) -> SectionResult:
     base = dict(
         case_name=group.case_name,
@@ -71,25 +72,26 @@ async def _process_group(
     async with semaphore:
         try:
             section = load_group(group)
+            if describer is not None:
+                section = await enrich_section_with_vision(
+                    section, group.file_paths, describer
+                )
             if not section.primary_text:
                 return SectionResult(
                     **base, status="failed", error="无可解析的文本内容"
                 )
             assessment = await assessor.assess(section)
             doc = await extractor.extract(section)
-            if describer is not None:
-                vision_block = await enrich_section_with_vision(
-                    group.file_paths, describer
-                )
-                if vision_block:
-                    doc = ExtractedDoc(
-                        title=doc.title,
-                        body_markdown=doc.body_markdown.rstrip()
-                        + "\n\n"
-                        + vision_block,
-                    )
             review = await reviewer.review(section, doc) if reviewer else None
-            result = write_section_output(section, assessment, doc, output_dir)
+            if review and reviser and (not review.passed or review.issues):
+                revised_doc = await reviser.revise(section, doc, review)
+                revised_review = await reviewer.review(section, revised_doc)
+                if revised_review.passed:
+                    doc = revised_doc
+                    review = revised_review
+            result = write_section_output(
+                section, assessment, doc, output_dir, review=review
+            )
             return SectionResult(
                 **base,
                 status="ok",
@@ -141,12 +143,14 @@ async def run_pipeline(
     vision: bool = True,
     vision_model: OpenAIChatModel | None = None,
     review: bool = False,
+    auto_fix: bool = False,
 ) -> list[SectionResult]:
     """对一批知识单元并发执行研判 + 提取 +（可选）视觉增强 + 落盘，并写出 manifest。
 
-    ``vision=True`` 时对各单元的 pptx 配图做视觉识别，把信息图转写追加到正文末尾，
-    识别结果按 sha256 缓存于 ``output_dir/.image_cache``。视觉识别走 ``vision_model``
-    （qwen 不支持图像，须传入支持视觉的模型）；未显式传入时回退复用 ``model``。
+    ``vision=True`` 时对各单元的 pptx/pdf 配图做视觉识别，把信息图转写绑定回
+    对应页的源素材，再进入研判 / 提取 / 质检。识别结果按 sha256 缓存于
+    ``output_dir/.image_cache``。视觉识别走 ``vision_model``（qwen 不支持图像，
+    须传入支持视觉的模型）；未显式传入时回退复用 ``model``。
     """
     assessor = AssessorAgent(model)
     extractor = ExtractorAgent(model)
@@ -158,6 +162,7 @@ async def run_pipeline(
         else None
     )
     reviewer = ReviewerAgent(model) if review else None
+    reviser = ReviserAgent(model) if review and auto_fix else None
     semaphore = asyncio.Semaphore(concurrency)
 
     tasks = [
@@ -170,6 +175,7 @@ async def run_pipeline(
             output_dir,
             describer,
             reviewer,
+            reviser,
         )
         for group in groups
     ]

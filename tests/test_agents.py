@@ -12,6 +12,7 @@ import json
 from insurance_coach_agents.agents import (
     AssessorAgent,
     ExtractorAgent,
+    ReviserAgent,
     ReviewerAgent,
 )
 from insurance_coach_agents.agents.factory import (
@@ -54,7 +55,9 @@ class _FakeModel:
         self._structured = structured
         self._content_blocks = content_blocks
 
-    async def generate_structured_output(self, messages, structured_model):
+    async def generate_structured_output(
+        self, messages, structured_model, tool_choice=None
+    ):
         return _FakeStructured(self._structured)
 
     async def __call__(self, messages):
@@ -158,6 +161,33 @@ def test_review_issues_coerces_json_string_to_list():
     assert review.issues == ["缺少一级标题", "层级跳级"]
 
 
+def test_reviser_returns_clean_revised_markdown_doc():
+    model = _FakeModel(
+        content_blocks=[
+            {
+                "type": "text",
+                "text": "```markdown\n# 千万保额健康险\n## 关键话术\n返修后的正文\n```",
+            }
+        ]
+    )
+    doc = ExtractedDoc(title="旧标题", body_markdown="# 旧标题\n正文")
+    review = ReviewResult(
+        passed=False,
+        heading_ok=True,
+        fidelity_ok=False,
+        no_meta_leak=True,
+        issues=["遗漏了关键话术"],
+        score=0.5,
+    )
+
+    revised = asyncio.run(ReviserAgent(model).revise(_section(), doc, review))
+
+    assert isinstance(revised, ExtractedDoc)
+    assert revised.title == "千万保额健康险"
+    assert revised.body_markdown == "# 千万保额健康险\n## 关键话术\n返修后的正文"
+    assert "```" not in revised.body_markdown
+
+
 def test_write_section_output_creates_md_and_meta(tmp_path):
     # Arrange
     section = _section()
@@ -188,3 +218,109 @@ def test_write_section_output_creates_md_and_meta(tmp_path):
     assert meta["topics"] == ["需求面谈", "异议处理"]
     assert meta["serves"]["roleplay"] == "high"
     assert meta["sources"] == ["docx", "txt"]
+
+
+def test_write_section_output_creates_block_provenance_sidecar(tmp_path):
+    section = _section()
+    assessment = Assessment(
+        worth_storing=True,
+        reason="理由",
+        topics=["需求面谈"],
+        serves=ServesRating(qa="high", recommend="mid", exam="low", roleplay="high"),
+        value_score=0.86,
+    )
+    doc = ExtractedDoc(
+        title="千万保额健康险",
+        body_markdown="# 千万保额健康险\n## 需求面谈\n要点",
+    )
+
+    result = write_section_output(section, assessment, doc, output_dir=tmp_path)
+
+    assert result.provenance_path == tmp_path / "案例X" / "第1节.provenance.json"
+    provenance = json.loads(result.provenance_path.read_text(encoding="utf-8"))
+    assert provenance["case"] == "案例X"
+    assert provenance["section"] == "第1节"
+    assert provenance["title"] == "千万保额健康险"
+    assert {
+        "source_id": "docx:d.docx",
+        "type": "docx",
+        "filename": "d.docx",
+        "path": "案例X/第1节/d.docx",
+    } in provenance["sources"]
+    demand_block = next(
+        block for block in provenance["blocks"] if block["heading_path"][-1] == "需求面谈"
+    )
+    assert demand_block["markdown_start_line"] > 0
+    assert demand_block["markdown_end_line"] >= demand_block["markdown_start_line"]
+    assert demand_block["source_refs"][0]["source_id"] == "docx:d.docx"
+    assert demand_block["source_refs"][0]["locator"]["heading_path"] == ["讲义"]
+    assert demand_block["source_refs"][0]["match_score"] > 0
+
+
+def test_write_section_output_provenance_refs_pptx_page(tmp_path):
+    section = RawSection(
+        case_name="案例X",
+        section_name="第1节",
+        section_dir="案例X/第1节",
+        files=(
+            ParsedFile(
+                file_type=FileType.PPTX,
+                filename="deck.pptx",
+                text="## 第 1 页\n客户需求\n\n## 第 2 页\n异议处理话术",
+            ),
+        ),
+    )
+    assessment = Assessment(
+        worth_storing=True,
+        reason="理由",
+        topics=["异议处理"],
+        serves=ServesRating(qa="high", recommend="mid", exam="low", roleplay="high"),
+        value_score=0.86,
+    )
+    doc = ExtractedDoc(
+        title="异议处理",
+        body_markdown="# 异议处理\n## 关键话术\n异议处理话术",
+    )
+
+    result = write_section_output(section, assessment, doc, output_dir=tmp_path)
+
+    provenance = json.loads(result.provenance_path.read_text(encoding="utf-8"))
+    block = next(
+        block for block in provenance["blocks"] if block["heading_path"][-1] == "关键话术"
+    )
+    assert block["source_refs"][0]["source_id"] == "pptx:deck.pptx"
+    assert block["source_refs"][0]["locator"]["page"] == 2
+
+
+def test_write_section_output_creates_review_markdown_when_review_given(tmp_path):
+    section = _section()
+    assessment = Assessment(
+        worth_storing=True,
+        reason="理由",
+        topics=["需求面谈"],
+        serves=ServesRating(qa="high", recommend="mid", exam="low", roleplay="high"),
+        value_score=0.86,
+    )
+    doc = ExtractedDoc(title="千万保额健康险", body_markdown="# 千万保额健康险\n正文")
+    review = ReviewResult(
+        passed=False,
+        heading_ok=True,
+        fidelity_ok=False,
+        no_meta_leak=True,
+        issues=["遗漏了第二步面谈话术原文"],
+        score=0.5,
+    )
+
+    result = write_section_output(
+        section, assessment, doc, output_dir=tmp_path, review=review
+    )
+
+    assert result.review_path == tmp_path / "案例X" / "第1节.review.md"
+    report = result.review_path.read_text(encoding="utf-8")
+    assert report.startswith("# 第1节 - 质检报告")
+    assert "- 是否通过: 否" in report
+    assert "- 综合评分: 0.50" in report
+    assert "- Markdown 规范性: 通过" in report
+    assert "- 信息保真: 未通过" in report
+    assert "- 无加工旁白: 通过" in report
+    assert "- 遗漏了第二步面谈话术原文" in report

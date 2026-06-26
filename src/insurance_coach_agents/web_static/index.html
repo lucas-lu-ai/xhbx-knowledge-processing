@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>保险知识沉淀工作台</title>
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Insurance Coach Knowledge Pipeline</p>
+            <h1>保险知识沉淀工作台</h1>
+          </div>
+          <div class="status-chip" id="globalStatus">待上传</div>
+        </header>
+
+        <section class="control-grid">
+          <form class="upload-panel" id="uploadForm">
+            <label class="dropzone" id="dropzone">
+              <input
+                id="fileInput"
+                name="file"
+                type="file"
+                accept=".zip,.docx,.pptx,.pdf,.txt"
+                required
+              />
+              <span class="drop-title">上传素材</span>
+              <span class="drop-subtitle" id="fileLabel">支持 ZIP / DOCX / PPTX / PDF / TXT</span>
+            </label>
+
+            <div class="option-row">
+              <label class="switch">
+                <input type="checkbox" id="visionOption" />
+                <span>视觉识别</span>
+              </label>
+              <label class="switch">
+                <input type="checkbox" id="reviewOption" checked />
+                <span>质检</span>
+              </label>
+              <label class="switch">
+                <input type="checkbox" id="autoFixOption" checked />
+                <span>返修</span>
+              </label>
+            </div>
+
+            <button class="primary-button" type="submit" id="submitButton">
+              启动解析
+            </button>
+          </form>
+
+          <aside class="task-panel">
+            <div class="panel-heading">
+              <h2>任务状态</h2>
+              <span id="taskId">未创建任务</span>
+            </div>
+            <ol class="timeline">
+              <li class="timeline-item active" data-step="queued">
+                <span></span>
+                <p>排队</p>
+              </li>
+              <li class="timeline-item" data-step="running">
+                <span></span>
+                <p>解析</p>
+              </li>
+              <li class="timeline-item" data-step="succeeded">
+                <span></span>
+                <p>完成</p>
+              </li>
+            </ol>
+            <p class="task-message" id="taskMessage">等待素材上传。</p>
+          </aside>
+        </section>
+
+        <section class="result-panel">
+          <div class="panel-heading">
+            <h2>结果文件</h2>
+            <div class="panel-actions">
+              <a
+                class="ghost-button disabled"
+                id="archiveButton"
+                href="#"
+                role="button"
+                aria-disabled="true"
+              >
+                下载全部 ZIP
+              </a>
+              <button class="ghost-button" type="button" id="refreshButton" disabled>
+                刷新
+              </button>
+            </div>
+          </div>
+          <div class="file-table" id="fileTable">
+            <p class="empty-state">任务完成后将在这里显示可下载文件。</p>
+          </div>
+        </section>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

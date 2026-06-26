@@ -10,7 +10,7 @@ from agentscope.model import OpenAIChatModel
 
 from ..models import Assessment, RawSection
 from .cleanup import clean_reason
-from .factory import render_section_material
+from .factory import STRUCTURED_TOOL_CHOICE, render_section_material
 from .prompts import ASSESSOR_SYSTEM_PROMPT
 
 
@@ -28,7 +28,9 @@ class AssessorAgent:
             UserMsg(name="user", content=material),
         ]
         response = await self._model.generate_structured_output(
-            messages, structured_model=Assessment
+            messages,
+            structured_model=Assessment,
+            tool_choice=STRUCTURED_TOOL_CHOICE,
         )
         content = dict(response.content)
         content["reason"] = clean_reason(str(content.get("reason", "")))

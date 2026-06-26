@@ -20,11 +20,18 @@ wheels/
 # IDE
 .idea/
 
+.claude/
+
 # Pipeline output
 output/
+web_runs/
+logs/
 
-# 客户原始素材（含 GB 级音视频，不入库）
+# 客户原始素材（含 GB 级音视频，不sss入库）
 数据/
+
+# 文档
+docs/
 
 # Test cache
 .pytest_cache/

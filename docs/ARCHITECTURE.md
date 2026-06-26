@@ -16,7 +16,7 @@
 **本项目（知识沉淀智能体）是上述四者的共同上游**：把客户提供的原始绩优案例素材，
 加工成"干净、结构化、带元数据、可向量化"的 Markdown 知识单元。
 
-> **本期边界**：只产出 `md` + 元数据 sidecar，**不做 embedding、不写向量库**——向量化与入库由下游统一处理。
+> **本期边界**：只产出 `md` + 元数据/溯源 sidecar，**不做 embedding、不写向量库**——向量化与入库由下游统一处理。
 
 ## 2. 数据资产
 
@@ -32,7 +32,7 @@
 | `.mp3/.mp4/.mov/.m4a` | 音视频媒体 | **跳过**（已有 txt 转写，本期不做 ASR） |
 
 **核心判断**：docx 已是高质量人工讲义，因此任务本质不是"从噪音中艰难抽取"，
-而是 **以 docx 为骨架 → pptx/txt 交叉补全 → 价值研判（给理由）→ 标准化 md + 元数据标注**。
+而是 **以 docx 为骨架 → pptx/txt/视觉信息交叉补全 → 价值研判（给理由）→ 标准化 md + 元数据/溯源标注**。
 
 ## 3. 技术底座（AgentScope 2.0.2）
 
@@ -97,18 +97,18 @@ model = OpenAIChatModel(credential=cred, model="qwen3.7-max",
    │  RawSection 对象    │  docx标题层级+表格 / pptx按页 / pdf逐页 / txt清洗；媒体跳过
    └────────┬──────────┘
             ▼
-   ① AssessorAgent   研判：能否入库？理由 + 主题标签 + 四维价值评级 + 评分（结构化输出）
-            ▼
-   ② ExtractorAgent  提取：以docx为骨架融合pptx/txt → 标准 md；cleanup 清洗元注释/列表符/围栏
-            ▼
-   ③ 视觉增强（可选，enrich + ImageDescriber，走 gpt-4o）
+   ① 视觉增强（可选，enrich + ImageDescriber，走 gpt-4o）
       pptx/pdf抽图 → sha256去重 + 尺寸预过滤 → 视觉识别（装饰图/碎片丢弃）
-      → 信息图转写为 md，追加到正文末尾「## 课件图片信息（视觉识别）」；按 sha256 缓存
+      → 信息图转写绑定回对应页的 RawSection 素材；按 sha256 缓存
+            ▼
+   ② AssessorAgent   研判：能否入库？理由 + 主题标签 + 四维价值评级 + 评分（结构化输出）
+            ▼
+   ③ ExtractorAgent  提取：以docx为骨架融合pptx/txt/同页视觉信息 → 标准 md；cleanup 清洗元注释/列表符/围栏
             ▼
    ④ 质检（可选 --review，ReviewerAgent）：对最终稿审计规范性/信息保真/无旁白 → ReviewResult
             ▼
    output_writer（原子写入：先 .tmp 再 rename）
-   → output/<案例>/<节>.md  +  <节>.meta.json
+   → output/<案例>/<节>.md  +  <节>.meta.json  +  <节>.provenance.json  +  可选 <节>.review.md
             ▼
    pipeline 汇总 → output/manifest.json（每节状态/评分/理由，供抽检）
 ```
@@ -129,11 +129,11 @@ model = OpenAIChatModel(credential=cred, model="qwen3.7-max",
 |---|---|---|---|
 | 分组层（grouping） | 素材根目录 | `SourceGroup` 列表 | 否 |
 | 解析层（parsers） | 一组文件 | `RawSection` | 否 |
-| ① AssessorAgent | `RawSection` | `Assessment`（入库与否、理由、标签、四维评级、评分） | 是 |
-| ② ExtractorAgent | `RawSection` | `ExtractedDoc`（标准 md 正文，经 cleanup） | 是 |
-| ③ 视觉增强（enrich + ImageDescriber） | 节内 pptx/pdf 配图 | 追加到正文的视觉章节（装饰图/碎片自动丢弃） | 是（视觉模型） |
+| ① 视觉增强（enrich + ImageDescriber，可选） | `RawSection` + 节内 pptx/pdf 配图 | 绑定了同页配图转写的 `RawSection`（装饰图/碎片自动丢弃） | 是（视觉模型） |
+| ② AssessorAgent | `RawSection` | `Assessment`（入库与否、理由、标签、四维评级、评分） | 是 |
+| ③ ExtractorAgent | `RawSection` | `ExtractedDoc`（标准 md 正文，经 cleanup） | 是 |
 | ④ ReviewerAgent（可选 `--review`） | `ExtractedDoc` + `RawSection` | `ReviewResult`（规范性/保真/无旁白 + issues + score），汇总进 manifest | 是 |
-| output_writer | 上述结果 | `<节>.md` + `<节>.meta.json`（原子写） | 否 |
+| output_writer | 上述结果 | `<节>.md` + `<节>.meta.json` + `<节>.provenance.json` + 可选 `<节>.review.md`（原子写） | 否 |
 | pipeline | 全部结果 | `manifest.json` | 否 |
 
 ## 5. 目录结构
@@ -160,11 +160,12 @@ xhbx/
 │   │   ├── assessor.py           # 研判
 │   │   ├── extractor.py          # 提取
 │   │   ├── vision.py             # ImageDescriber：配图视觉识别 + 装饰/碎片过滤 + 缓存
-│   │   ├── enrich.py             # 视觉章节组装（方案 A：汇总到正文末尾）
+│   │   ├── enrich.py             # 视觉增强：配图转写按页绑定回 RawSection
 │   │   ├── reviewer.py           # ReviewerAgent：整理稿质检（规范性/保真/无旁白）
 │   │   ├── cleanup.py            # 产出清洗（元注释/列表符/残留符）
 │   │   └── prompts.py            # 中文 system prompt（含视觉）
-│   ├── output_writer.py          # 原子落盘 md + meta.json
+│   ├── provenance.py             # 块级溯源：源素材锚点 + Markdown 块匹配
+│   ├── output_writer.py          # 原子落盘 md + meta/provenance/review json
 │   └── pipeline.py               # 批处理编排 + manifest
 └── tests/                        # 解析/智能体/清洗/编排单测（fake 模型，不烧 API）
 ```
@@ -172,11 +173,195 @@ xhbx/
 ## 6. 产物格式
 
 Markdown = YAML frontmatter（`case/section/title/topics/serves/value_score/worth_storing/sources`）
-+ 标准化正文；开启视觉时，正文末尾追加 `## 课件图片信息（视觉识别）` 章节，逐条标注「第 N 页配图」。
-同名 `.meta.json` 存结构化元数据（含研判 `reason`、`section_dir` 溯源）；
++ 标准化正文；开启视觉时，信息图转写先绑定回 pptx/pdf 对应页素材，再由 ExtractorAgent 与原文语义一起整理。
+同名 `.meta.json` 存单元级结构化元数据（含研判 `reason`、`section_dir`）；
+同名 `.provenance.json` 存块级溯源（最终 Markdown 块 → 源文件页码/标题/段落）；
 全局 `manifest.json` 汇总每节 `status/value_score/topics/reason`，供人工抽检；
 开启 `--review` 时附 `review_passed/review_score/review_issues` 与汇总 `review_failed`。
 视觉识别结果按图片 sha256 缓存于 `output/.image_cache/`（空文件=装饰图/无价值，可重跑复用）。
+
+### 6.1 `meta.json` 与 `provenance.json` 的分工
+
+`meta.json` 是**知识单元级**元数据，服务筛选、检索过滤和 manifest 汇总：
+
+- `case` / `section` / `title`：案例、章节与整理稿标题。
+- `topics` / `serves` / `value_score` / `worth_storing` / `reason`：AssessorAgent 的研判结果。
+- `sources`：参与该单元整理的文件类型列表，如 `["docx", "pptx", "txt"]`。
+- `section_dir`：原始节目录标识，用于回到素材包。
+
+`provenance.json` 是**Markdown 块级**溯源，服务 RAG chunk 入库、答案引用和人工核查。它不写入
+Markdown 正文，避免污染可向量化文本；下游可按 `markdown_start_line` / `markdown_end_line`
+把 Markdown 正文切块，并读取对应 `source_refs` 做引用。
+
+### 6.2 `provenance.json` 写入时机
+
+`provenance.json` 由 `output_writer.write_section_output()` 在落盘阶段同步写入：
+
+1. `pipeline` 得到最终 `RawSection`、`Assessment`、`ExtractedDoc`，以及可选 `ReviewResult`。
+2. `output_writer` 先根据 `Assessment` 和 `ExtractedDoc` 渲染 Markdown frontmatter。
+3. `output_writer` 调用 `build_provenance(section, doc, body_start_line=...)`。
+4. `build_provenance()` 只使用确定性数据：增强后的 `RawSection` 与最终 `doc.body_markdown`。
+5. `output_writer` 分别原子写入 `.md`、`.meta.json`、`.provenance.json`，有质检时再写 `.review.md`。
+
+`body_start_line` 是最终 `.md` 文件中正文第一行的行号。计算方式为：
+
+```python
+body_start_line = len(frontmatter.splitlines()) + 2
+```
+
+原因是最终 Markdown 文件格式为：
+
+```markdown
+---
+frontmatter...
+---
+
+# 正文标题
+```
+
+也就是 frontmatter 结束后有一个空行，因此正文第一行 = frontmatter 行数 + 2。这样
+`provenance.json` 的 `markdown_start_line` / `markdown_end_line` 可以直接定位最终 `.md` 文件。
+
+### 6.3 `provenance.json` 顶层结构
+
+示例：
+
+```json
+{
+  "version": 1,
+  "case": "案例X",
+  "section": "第1节",
+  "title": "异议处理",
+  "sources": [
+    {
+      "source_id": "pptx:deck.pptx",
+      "type": "pptx",
+      "filename": "deck.pptx",
+      "path": "案例X/第1节/deck.pptx"
+    }
+  ],
+  "blocks": [
+    {
+      "block_id": "b002",
+      "heading_path": ["异议处理", "关键话术"],
+      "markdown_start_line": 12,
+      "markdown_end_line": 16,
+      "text_hash": "sha256...",
+      "source_refs": [
+        {
+          "source_id": "pptx:deck.pptx",
+          "anchor_id": "pptx:deck.pptx#page-2",
+          "locator": {
+            "page": 2,
+            "source_start_line": 4,
+            "source_end_line": 6
+          },
+          "match_score": 0.8125
+        }
+      ]
+    }
+  ]
+}
+```
+
+字段含义：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `version` | number | provenance schema 版本；当前为 `1`，后续字段变更时递增。 |
+| `case` | string | 案例名，来自 `RawSection.case_name`。 |
+| `section` | string | 节名，来自 `RawSection.section_name`。 |
+| `title` | string | 最终 Markdown 知识单元标题，来自 `ExtractedDoc.title`。 |
+| `sources` | array | 本知识单元参与整理的非空源文件列表。 |
+| `blocks` | array | 最终 Markdown 正文按标题切分后的块列表。 |
+
+### 6.4 `sources[]` 字段
+
+`sources` 来自 `RawSection.files` 中所有非空 `ParsedFile`。每个元素含义：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `source_id` | string | 源文件稳定 ID，格式为 `<file_type>:<filename>`，如 `docx:讲义.docx`、`pptx:课件.pptx`。 |
+| `type` | string | 文件类型：`docx` / `pptx` / `pdf` / `txt`。 |
+| `filename` | string | 原始文件名。 |
+| `path` | string | 源文件在素材包中的路径，格式为 `<section_dir>/<filename>`；Web 上传任务中 `section_dir` 可能是任务目录路径。 |
+
+### 6.5 `blocks[]` 字段
+
+`blocks` 来自最终 `doc.body_markdown`。切分规则是：每个 Markdown 标题行（`#` 到 `######`）
+开启一个块，块内容持续到下一个标题前。没有标题时，整个正文作为 `b001`。
+
+每个元素含义：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `block_id` | string | 块 ID，按正文出现顺序生成，如 `b001`、`b002`。 |
+| `heading_path` | string[] | 当前块的标题路径，如 `["异议处理", "关键话术"]`。 |
+| `markdown_start_line` | number | 当前块在最终 `.md` 文件中的起始行号，包含 frontmatter 后的真实行号。 |
+| `markdown_end_line` | number | 当前块在最终 `.md` 文件中的结束行号。 |
+| `text_hash` | string | 当前块文本的 SHA-256，用于下游校验块内容是否被改动。 |
+| `source_refs` | array | 与该 Markdown 块最相关的源素材锚点，最多 3 条。 |
+
+### 6.6 `source_refs[]` 字段
+
+`source_refs` 是确定性匹配结果，不是模型生成的引用。当前算法在 `provenance.py` 中完成：
+
+1. 将源素材切成可定位锚点（source anchors）。
+2. 将最终 Markdown 切成标题块（markdown blocks）。
+3. 对每个 Markdown 块和每个源素材锚点做文本归一化。
+4. 使用字符 bigram 重叠计算 `match_score`。
+5. 每个 Markdown 块最多保留分数最高的 3 个源锚点。
+
+每个元素含义：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `source_id` | string | 指向 `sources[].source_id`。 |
+| `anchor_id` | string | 源素材锚点 ID，格式随锚点类型变化，如 `pptx:deck.pptx#page-2`。 |
+| `locator` | object | 源素材内的定位信息，字段随文件类型/锚点类型变化。 |
+| `match_score` | number | 0~1 的文本重叠分数，越高表示该源锚点与 Markdown 块越相似；不是置信概率。 |
+
+`locator` 的常见形态：
+
+```json
+{ "page": 2, "source_start_line": 4, "source_end_line": 6 }
+```
+
+用于 pptx/pdf 按页解析结果。`page` 是页码；`source_start_line` / `source_end_line`
+是该页块在解析后 `ParsedFile.text` 中的行号。
+
+```json
+{ "heading_path": ["课程主题", "异议处理"], "source_start_line": 1, "source_end_line": 8 }
+```
+
+用于 docx 等带 Markdown 标题的文本。`heading_path` 是源素材解析文本中的标题路径。
+
+```json
+{ "block_index": 3, "source_start_line": 12, "source_end_line": 16 }
+```
+
+用于没有页标题/Markdown 标题的文本兜底锚点，如部分 txt 或异常解析结果。
+
+### 6.7 源素材锚点生成规则
+
+`build_provenance()` 对不同源文件使用不同锚点策略：
+
+| 文件类型 | 优先锚点 | 兜底锚点 | 说明 |
+|---|---|---|---|
+| `pptx` | `## 第 N 页` 页块 | 空行分隔的段落块 | pptx parser 本身按页输出，视觉增强也把配图转写绑定到对应页。 |
+| `pdf` | `## 第 N 页` 页块 | 空行分隔的段落块 | pdf parser 逐页提取文本；扫描件无文本时不会进入非空 sources。 |
+| `docx` | Markdown 标题块 | 空行分隔的段落块 | docx parser 保留 Word 标题层级与表格。 |
+| `txt` | Markdown 标题块（若存在） | 空行分隔的段落块 | txt 多为口语转写，通常走段落块兜底。 |
+
+### 6.8 准确性边界
+
+`provenance.json` 是**块级、保守匹配**，不是逐字逐句引用：
+
+- ExtractorAgent 会融合、压缩、改写多个来源，事后无法可靠恢复每一句的唯一出处。
+- `source_refs` 表示“该 Markdown 块最可能参考了这些源锚点”，适合 RAG chunk 引用、人工抽查和召回调试。
+- `match_score` 只基于文本重叠，不表示事实正确概率；质检仍由 ReviewerAgent 负责。
+- 若某块是高度概括或模型改写幅度很大，`source_refs` 可能为空或分数较低；这比伪造精确引用更安全。
+- 若需要强溯源，可在下一阶段把 ExtractorAgent 改为结构化输出块列表，并要求模型为每个块显式选择 source anchors。
 
 ## 7. 实现里程碑
 
@@ -187,3 +372,4 @@ Markdown = YAML frontmatter（`case/section/title/topics/serves/value_score/wort
 | **M3** | 全库批处理（并发/增量/错误隔离）+ 分组策略 + manifest + 原子写入 + 产出清洗 | ✅ |
 | **M4a** | 视觉增强：pptx 配图 → 文字（独立视觉模型 gpt-4o）+ 装饰/碎片过滤 + sha256 缓存 + 降级 | ✅ |
 | **M4b** | Reviewer 质检（规范性/信息保真/无旁白，`--review`）+ PDF 图片抽取 | ✅ |
+| **M5** | 块级溯源：生成 `<节>.provenance.json`，记录 Markdown 块到源文件页码/标题/段落的引用 | ✅ |
