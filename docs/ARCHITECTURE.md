@@ -17,6 +17,8 @@
 加工成"干净、结构化、带元数据、可向量化"的 Markdown 知识单元。
 
 > **本期边界**：只产出 `md` + 元数据/溯源 sidecar，**不做 embedding、不写向量库**——向量化与入库由下游统一处理。
+> 案例级销售洞察同样只产出本地 sidecar：`<节>.sales_evidence.json`、
+> `case.sales_insights.json` 与 `case.sales_playbook.md`，不直接进入向量库。
 
 ## 2. 数据资产
 
@@ -113,6 +115,28 @@ model = OpenAIChatModel(credential=cred, model="qwen3.7-max",
    pipeline 汇总 → output/manifest.json（每节状态/评分/理由，供抽检）
 ```
 
+主流水线之外还有一条 **案例级销售洞察支线**，由 `sales-insights` 命令触发。它复用解析、
+视觉增强和模型构造能力，但处理粒度从“单节知识单元”上升到“完整案例”：
+
+```
+同一案例下的 SourceGroup 列表
+            │  按自然顺序排序（第2节 < 第10节）
+            ▼
+逐节 load_group / 可选视觉增强
+            ▼
+SectionSalesEvidenceAgent
+  单节销售证据：客户信号 / 销售动作 / 原始话术 / 异议 / 候选策略
+            ▼
+写出 <节>.sales_evidence.json
+            ▼
+CaseSalesInsightAgent
+  整案归纳：客户旅程 / 销售策略 / 场景话术 / 异议处理
+            ▼
+sales_output_writer
+  → case.sales_insights.json
+  → case.sales_playbook.md
+```
+
 ### 4.1 设计原则
 
 - **分组与解析与推理分离**：分组（怎么归并文件）与解析（读文件）都是确定性的，
@@ -120,8 +144,11 @@ model = OpenAIChatModel(credential=cred, model="qwen3.7-max",
 - **解析放工具层**：确定性、可单测、省 token；LLM 只做研判与整理。
 - **研判独立成 Agent**：客户要求"给出理由"，产出可审计的 `manifest.json`。
 - **以知识单元为流水线粒度**：天然可并发、失败单元隔离、增量友好（跳过已产出）。
+- **销售洞察分两级**：节级只采集证据，案例级才抽象策略与话术，避免用单节内容过度泛化。
 - **原子落盘**：中断不会留下空/半截文件。
 - **不可变数据流**：`SourceGroup → RawSection → Assessment / ExtractedDoc`，不就地修改。
+- **合规与溯源优先**：案例级话术必须有合规提示；若节级证据有来源引用，案例级每个洞察条目
+  必须保留有效 `evidence_refs`，空引用对象不算可追溯来源。
 
 ### 4.2 各环节职责
 
@@ -135,6 +162,35 @@ model = OpenAIChatModel(credential=cred, model="qwen3.7-max",
 | ④ ReviewerAgent（可选 `--review`） | `ExtractedDoc` + `RawSection` | `ReviewResult`（规范性/保真/无旁白 + issues + score），汇总进 manifest | 是 |
 | output_writer | 上述结果 | `<节>.md` + `<节>.meta.json` + `<节>.provenance.json` + 可选 `<节>.review.md`（原子写） | 否 |
 | pipeline | 全部结果 | `manifest.json` | 否 |
+| SectionSalesEvidenceAgent（`sales-insights`） | 单节 `RawSection` | `SectionSalesEvidence`：客户信号、销售动作、原始话术、异议、候选策略 | 是 |
+| CaseSalesInsightAgent（`sales-insights`） | 同一案例下全部 `SectionSalesEvidence` | `CaseSalesInsights`：客户旅程、销售策略、场景话术、异议处理 | 是 |
+| sales_output_writer | 销售证据与案例洞察 | `<节>.sales_evidence.json` + `case.sales_insights.json` + `case.sales_playbook.md` | 否 |
+
+### 4.3 案例级销售洞察 Agent
+
+`sales-insights` 命令使用两个新智能体，并保持“证据采集”和“策略归纳”分离：
+
+1. `SectionSalesEvidenceAgent`
+   - 输入：单节 `RawSection`，可包含视觉增强后的课件/PDF 配图转写。
+   - 输出：`SectionSalesEvidence`。
+   - 职责：只采集销售证据，包括客户信号、销售动作、原始话术、客户异议和候选策略。
+   - 边界：不把单节内容包装成完整方法论；候选策略必须标记依据和置信度。
+
+2. `CaseSalesInsightAgent`
+   - 输入：同一案例下按自然顺序排列的全部 `SectionSalesEvidence`。
+   - 输出：`CaseSalesInsights`。
+   - 职责：从完整案例视角提炼客户旅程、贯穿策略、场景话术和异议处理。
+   - 边界：不能生成无证据支撑的策略；`coach_wording` 必须忠于 `source_quote` 的语义。
+
+`sales_pipeline.run_case_sales_insights()` 负责把这两个 agent 串起来，并做三类保护：
+
+- **身份归一化**：节级证据写出前强制使用真实 `section.case_name` / `section.section_name`；
+  案例级洞察写出前强制使用用户请求的 `case_name`，避免模型返回错误名称导致产物写到错误目录。
+- **有效证据过滤**：若某节返回的 `SectionSalesEvidence` 五类列表全为空，不写出该节销售证据，
+  也不参与案例级归纳；若整个案例都没有销售证据，返回失败。
+- **来源与合规校验**：若节级证据含有效 `source_refs`，则案例级每个 customer journey / strategy /
+  script / objection handling 条目都必须有至少一个有效 `evidence_refs`；`CaseSalesScript` 的
+  `compliance_notes` 为空时自动补充保守合规提示。
 
 ## 5. 目录结构
 
@@ -147,9 +203,9 @@ xhbx/
 ├── .env / .env.example           # 第三方平台凭证
 ├── pyproject.toml                # 依赖与 CLI 入口（insurance-coach-md）
 ├── src/insurance_coach_agents/
-│   ├── cli.py                    # 入口：stats / show / build / run
+│   ├── cli.py                    # 入口：stats / show / build / run / sales-insights
 │   ├── config.py                 # 路径、文件类型映射、模型环境配置
-│   ├── models.py                 # ParsedFile/RawSection/Assessment/ServesRating/ExtractedDoc/ReviewResult
+│   ├── models.py                 # RawSection/Assessment/ExtractedDoc/ReviewResult/销售洞察契约
 │   ├── parsers/
 │   │   ├── docx_parser.py  pptx_parser.py  pdf_parser.py  txt_parser.py
 │   │   ├── image_extract.py      # pptx/pdf 抽图 + sha256 去重 + 尺寸预过滤
@@ -162,10 +218,13 @@ xhbx/
 │   │   ├── vision.py             # ImageDescriber：配图视觉识别 + 装饰/碎片过滤 + 缓存
 │   │   ├── enrich.py             # 视觉增强：配图转写按页绑定回 RawSection
 │   │   ├── reviewer.py           # ReviewerAgent：整理稿质检（规范性/保真/无旁白）
+│   │   ├── sales_insights.py     # 销售洞察：节级证据采集 + 案例级策略/话术归纳
 │   │   ├── cleanup.py            # 产出清洗（元注释/列表符/残留符）
 │   │   └── prompts.py            # 中文 system prompt（含视觉）
 │   ├── provenance.py             # 块级溯源：源素材锚点 + Markdown 块匹配
 │   ├── output_writer.py          # 原子落盘 md + meta/provenance/review json
+│   ├── sales_output_writer.py    # 原子落盘销售证据/案例销售洞察 json + playbook
+│   ├── sales_pipeline.py         # 案例级 sales-insights 编排
 │   └── pipeline.py               # 批处理编排 + manifest
 └── tests/                        # 解析/智能体/清洗/编排单测（fake 模型，不烧 API）
 ```
@@ -176,6 +235,9 @@ Markdown = YAML frontmatter（`case/section/title/topics/serves/value_score/wort
 + 标准化正文；开启视觉时，信息图转写先绑定回 pptx/pdf 对应页素材，再由 ExtractorAgent 与原文语义一起整理。
 同名 `.meta.json` 存单元级结构化元数据（含研判 `reason`、`section_dir`）；
 同名 `.provenance.json` 存块级溯源（最终 Markdown 块 → 源文件页码/标题/段落）；
+同名 `.sales_evidence.json` 存节级销售证据（客户信号、销售动作、原始话术、异议、候选策略）；
+案例级 `case.sales_insights.json` 存整案销售策略、场景话术和异议处理结构化数据；
+案例级 `case.sales_playbook.md` 是面向人工审阅的销售洞察手册；
 全局 `manifest.json` 汇总每节 `status/value_score/topics/reason`，供人工抽检；
 开启 `--review` 时附 `review_passed/review_score/review_issues` 与汇总 `review_failed`。
 视觉识别结果按图片 sha256 缓存于 `output/.image_cache/`（空文件=装饰图/无价值，可重跑复用）。
@@ -363,6 +425,48 @@ frontmatter...
 - 若某块是高度概括或模型改写幅度很大，`source_refs` 可能为空或分数较低；这比伪造精确引用更安全。
 - 若需要强溯源，可在下一阶段把 ExtractorAgent 改为结构化输出块列表，并要求模型为每个块显式选择 source anchors。
 
+### 6.9 销售洞察产物
+
+`sales-insights` 会新增三类 sidecar：
+
+```text
+output/
+├── <案例>/<节>.sales_evidence.json
+├── <案例>/case.sales_insights.json
+└── <案例>/case.sales_playbook.md
+```
+
+`<节>.sales_evidence.json` 是节级证据，不做完整方法论定论。核心字段：
+
+| 字段 | 含义 |
+|---|---|
+| `customer_signals` | 客户状态、需求信号、异议苗头、决策障碍。 |
+| `sales_actions` | 销售人员动作，如场景提问、风险唤醒、需求追问、异议接纳、促成。 |
+| `script_quotes` | 素材中的原始话术，尽量保留原话。 |
+| `objections` | 客户明确异议及素材中的应对证据。 |
+| `strategy_candidates` | 本节可能体现的候选策略，包含依据、置信度和 `inferred` 标记。 |
+
+`case.sales_insights.json` 是案例级洞察。核心字段：
+
+| 字段 | 含义 |
+|---|---|
+| `customer_journey` | 客户在完整案例中的阶段变化、销售目标和关键动作。 |
+| `strategies` | 贯穿案例的销售策略、步骤、建议做法和避免做法。 |
+| `scripts` | 场景化话术，区分 `source_quote`（原始话术）和 `coach_wording`（教练推荐话术）。 |
+| `objection_handling` | 异议诊断、推荐回应、关联策略和关联话术。 |
+
+`case.sales_playbook.md` 由同一份 `CaseSalesInsights` 渲染，方便业务人员审阅。它会展示
+客户旅程、销售策略、场景话术、异议处理、合规提醒和来源依据。若 `scripts[].compliance_notes`
+为空，模型契约会自动补充：
+
+```text
+未识别到特定合规风险，仍需以公司合规要求和正式条款为准。
+```
+
+销售洞察的 `evidence_refs` 是模型生成的轻量来源引用，不等同于 `provenance.json` 的确定性块级匹配。
+当前字段包括 `section_name`、`source_id`、`filename`、`quote`。为了避免伪溯源，空对象 `{}` 或全空字段
+不会被视为有效来源。
+
 ## 7. 实现里程碑
 
 | 里程碑 | 内容 | 状态 |
@@ -373,3 +477,4 @@ frontmatter...
 | **M4a** | 视觉增强：pptx 配图 → 文字（独立视觉模型 gpt-4o）+ 装饰/碎片过滤 + sha256 缓存 + 降级 | ✅ |
 | **M4b** | Reviewer 质检（规范性/信息保真/无旁白，`--review`）+ PDF 图片抽取 | ✅ |
 | **M5** | 块级溯源：生成 `<节>.provenance.json`，记录 Markdown 块到源文件页码/标题/段落的引用 | ✅ |
+| **M6** | 案例级销售洞察：`SectionSalesEvidenceAgent` + `CaseSalesInsightAgent` + `sales-insights` CLI | ✅ |
