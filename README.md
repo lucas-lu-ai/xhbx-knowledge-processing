@@ -65,6 +65,11 @@ uv run insurance-coach-md run --no-vision          # 关闭视觉识别
 uv run insurance-coach-md run --review             # 每节做质检并汇总到 manifest
 uv run insurance-coach-md run --review --auto-fix  # 质检有问题时返修并复检
 uv run insurance-coach-md run --grouping single-file   # 单文件=单元（拍平数据兜底）
+
+# 案例级销售洞察：整合一个完整案例下所有节，提取销售策略、销售话术与异议处理
+uv run insurance-coach-md sales-insights "<案例>"
+uv run insurance-coach-md sales-insights "<案例>" --no-vision
+uv run insurance-coach-md sales-insights --all
 ```
 
 > 视觉识别支持 pptx 与 pdf 内嵌图片；质检（`--review`）会审计整理稿的 Markdown 规范性、
@@ -79,6 +84,9 @@ output/
 ├── <案例>/<节>.md            # YAML frontmatter + 标准化正文（可融合配图信息）
 ├── <案例>/<节>.meta.json     # 单元级元数据（研判理由、四维价值评级等）
 ├── <案例>/<节>.provenance.json  # 块级溯源（Markdown 块 → 源文件页码/标题/段落）
+├── <案例>/<节>.sales_evidence.json  # 单节销售证据：客户信号/销售动作/原始话术/异议
+├── <案例>/case.sales_insights.json  # 案例级销售策略、话术、异议处理结构化数据
+├── <案例>/case.sales_playbook.md    # 面向人工审阅的案例销售洞察手册
 ├── <案例>/<节>.review.md     # 可选：质检报告（--review 时生成）
 ├── manifest.json             # 全库汇总：每节 status/value_score/topics/reason/review_*
 └── .image_cache/             # 配图识别缓存（按 sha256，空文件=装饰图）
@@ -87,6 +95,10 @@ output/
 开启视觉时，系统先将 pptx/pdf 内的信息图转写绑定到对应页素材的 `本页配图内容`，
 再交给研判、提取与质检链路；装饰图（logo/纹理/分割线/标语）与无价值碎片自动丢弃，
 不入正文。
+
+`sales-insights` 会以完整案例为单位整合所有节的内容：先生成节级销售证据，
+再提炼案例级销售策略、场景化话术和异议处理建议。该链路仍只写本地 sidecar 文件，
+不做 embedding、不写向量库。
 
 ## Web 界面
 

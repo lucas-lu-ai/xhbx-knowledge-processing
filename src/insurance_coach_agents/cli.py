@@ -31,6 +31,7 @@ from .output_writer import write_section_output
 from .parsers.grouping import group_by_directory, group_by_single_file
 from .parsers.section_loader import iter_section_dirs, load_section
 from .pipeline import IMAGE_CACHE_DIRNAME, run_pipeline
+from .sales_pipeline import run_case_sales_insights
 
 LOGGER = logging.getLogger(__name__)
 
@@ -245,8 +246,63 @@ async def _run_all(args: argparse.Namespace) -> int:
     return 0
 
 
+def _select_case_names(groups, case_name: str | None, all_cases: bool) -> list[str]:
+    """选择要生成销售洞察的案例名。"""
+    available = sorted({group.case_name for group in groups})
+    if all_cases:
+        if case_name:
+            raise ValueError("--all 不能同时指定案例名称")
+        if not available:
+            raise ValueError("未发现任何案例素材")
+        return available
+    if not case_name:
+        raise ValueError("请提供案例名称，或使用 --all 处理全部案例")
+    if case_name not in available:
+        raise ValueError(f"未找到案例: {case_name}")
+    return [case_name]
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     return asyncio.run(_run_all(args))
+
+
+async def _run_sales_insights(args: argparse.Namespace) -> int:
+    groups = group_by_directory()
+    try:
+        case_names = _select_case_names(
+            groups,
+            case_name=args.case,
+            all_cases=args.all,
+        )
+    except ValueError as exc:
+        LOGGER.error("%s", exc)
+        return 1
+
+    model = build_chat_model()
+    vision = not args.no_vision
+    vision_model = build_vision_model() if vision else None
+    failed = 0
+    for case_name in case_names:
+        LOGGER.info("提取案例级销售洞察: %s", case_name)
+        result = await run_case_sales_insights(
+            case_name,
+            groups,
+            model,
+            output_dir=OUTPUT_DIR,
+            vision=vision,
+            vision_model=vision_model,
+        )
+        if result.status == "ok":
+            LOGGER.info("  sales insights: %s", result.insights_path)
+            LOGGER.info("  sales playbook: %s", result.playbook_path)
+        else:
+            failed += 1
+            LOGGER.error("  失败: %s", result.error)
+    return 1 if failed else 0
+
+
+def _cmd_sales_insights(args: argparse.Namespace) -> int:
+    return asyncio.run(_run_sales_insights(args))
 
 
 def main() -> int:
@@ -302,6 +358,18 @@ def main() -> int:
         help="质检发现问题后调用返修智能体，复检通过才采用返修稿",
     )
     p_run.set_defaults(func=_cmd_run)
+
+    p_sales = sub.add_parser(
+        "sales-insights",
+        help="按完整案例提取销售策略、销售话术和异议处理洞察",
+        description="按完整案例提取销售策略、销售话术和异议处理洞察",
+    )
+    p_sales.add_argument("case", nargs="?", help="案例名称；使用 --all 时可省略")
+    p_sales.add_argument("--all", action="store_true", help="处理全部案例")
+    p_sales.add_argument(
+        "--no-vision", action="store_true", help="跳过课件配图的视觉识别"
+    )
+    p_sales.set_defaults(func=_cmd_sales_insights)
 
     args = parser.parse_args()
     if getattr(args, "auto_fix", False) and not getattr(args, "review", False):

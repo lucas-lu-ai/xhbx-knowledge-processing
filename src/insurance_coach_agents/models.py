@@ -35,6 +35,26 @@ def _coerce_str_list(value: object) -> object:
     return value
 
 
+def _coerce_model_list(value: object) -> object:
+    """把 LLM 偶尔返回的 JSON 字符串形式列表规整为 list。"""
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        try:
+            parsed = json.loads(stripped)
+        except (ValueError, TypeError):
+            return value
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            return [parsed]
+        return parsed
+    if isinstance(value, dict):
+        return [value]
+    return value
+
+
 class FileType(str, Enum):
     """参与解析的素材文件类型。"""
 
@@ -183,3 +203,262 @@ class ReviewResult(BaseModel):
     @classmethod
     def _coerce_issues(cls, v: object) -> object:
         return _coerce_str_list(v)
+
+
+# ---- 销售策略 / 话术提取契约 ----
+
+ConfidenceLevel = Literal["high", "mid", "low"]
+DEFAULT_COMPLIANCE_NOTE = "未识别到特定合规风险，仍需以公司合规要求和正式条款为准。"
+
+
+class SalesEvidenceRef(BaseModel):
+    """销售证据的来源引用，尽量指向节、文件和原文片段。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    section_name: str = Field(default="", description="证据所在章节")
+    source_id: str = Field(default="", description="来源 ID，如 provenance 中的 source_id")
+    filename: str = Field(default="", description="来源文件名")
+    quote: str = Field(default="", description="支撑该证据的短原文")
+
+
+class CustomerSignal(BaseModel):
+    """客户状态、触发点或需求信号。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    signal: str = Field(description="客户信号，如保障意识弱、预算顾虑、健康风险关注")
+    evidence: str = Field(description="素材中支撑该信号的内容")
+    source_refs: list[SalesEvidenceRef] = Field(default_factory=list)
+
+    @field_validator("source_refs", mode="before")
+    @classmethod
+    def _coerce_source_refs(cls, v: object) -> object:
+        return _coerce_model_list(v)
+
+
+class SalesAction(BaseModel):
+    """销售人员采取的动作。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    action: str = Field(description="销售动作")
+    stage_hint: str = Field(default="", description="阶段线索，如售前/需求面谈/异议处理/促成")
+    evidence: str = Field(description="素材中支撑该动作的内容")
+    source_refs: list[SalesEvidenceRef] = Field(default_factory=list)
+
+    @field_validator("source_refs", mode="before")
+    @classmethod
+    def _coerce_source_refs(cls, v: object) -> object:
+        return _coerce_model_list(v)
+
+
+class ScriptQuote(BaseModel):
+    """素材中的原始话术。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    quote: str = Field(description="原始话术")
+    speaker: str = Field(default="", description="说话人，如 sales/customer/trainer")
+    stage_hint: str = Field(default="", description="阶段线索")
+    scenario_hint: str = Field(default="", description="场景线索")
+    source_refs: list[SalesEvidenceRef] = Field(default_factory=list)
+
+    @field_validator("source_refs", mode="before")
+    @classmethod
+    def _coerce_source_refs(cls, v: object) -> object:
+        return _coerce_model_list(v)
+
+
+class ObjectionEvidence(BaseModel):
+    """客户异议和素材中的应对证据。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    objection: str = Field(description="客户异议")
+    response_evidence: str = Field(description="素材中出现的应对方式或话术")
+    source_refs: list[SalesEvidenceRef] = Field(default_factory=list)
+
+    @field_validator("source_refs", mode="before")
+    @classmethod
+    def _coerce_source_refs(cls, v: object) -> object:
+        return _coerce_model_list(v)
+
+
+class StrategyCandidate(BaseModel):
+    """从单节证据中识别出的候选销售策略。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str = Field(description="候选策略名称")
+    reason: str = Field(description="为什么认为素材体现了该策略")
+    confidence: ConfidenceLevel = Field(description="置信度")
+    inferred: bool = Field(default=True, description="是否由模型归纳推断")
+    source_refs: list[SalesEvidenceRef] = Field(default_factory=list)
+
+    @field_validator("source_refs", mode="before")
+    @classmethod
+    def _coerce_source_refs(cls, v: object) -> object:
+        return _coerce_model_list(v)
+
+
+class SectionSalesEvidence(BaseModel):
+    """单节销售证据：保真采集，不做整案策略定论。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    case_name: str
+    section_name: str
+    customer_signals: list[CustomerSignal] = Field(default_factory=list)
+    sales_actions: list[SalesAction] = Field(default_factory=list)
+    script_quotes: list[ScriptQuote] = Field(default_factory=list)
+    objections: list[ObjectionEvidence] = Field(default_factory=list)
+    strategy_candidates: list[StrategyCandidate] = Field(default_factory=list)
+
+    @field_validator(
+        "customer_signals",
+        "sales_actions",
+        "script_quotes",
+        "objections",
+        "strategy_candidates",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_lists(cls, v: object) -> object:
+        return _coerce_model_list(v)
+
+
+class CustomerJourneyStep(BaseModel):
+    """案例级客户旅程步骤。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    stage: str = Field(description="销售阶段")
+    customer_state: str = Field(description="该阶段客户状态")
+    sales_goal: str = Field(description="该阶段销售目标")
+    key_actions: list[str] = Field(default_factory=list)
+    evidence_refs: list[SalesEvidenceRef] = Field(default_factory=list)
+
+    @field_validator("key_actions", mode="before")
+    @classmethod
+    def _coerce_key_actions(cls, v: object) -> object:
+        return _coerce_str_list(v)
+
+    @field_validator("evidence_refs", mode="before")
+    @classmethod
+    def _coerce_evidence_refs(cls, v: object) -> object:
+        return _coerce_model_list(v)
+
+
+class CaseSalesStrategy(BaseModel):
+    """案例级销售策略。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    definition: str
+    applicable_stages: list[str] = Field(default_factory=list)
+    steps: list[str] = Field(default_factory=list)
+    do: list[str] = Field(default_factory=list)
+    dont: list[str] = Field(default_factory=list)
+    confidence: ConfidenceLevel
+    inferred: bool = True
+    evidence_refs: list[SalesEvidenceRef] = Field(default_factory=list)
+
+    @field_validator("aliases", "applicable_stages", "steps", "do", "dont", mode="before")
+    @classmethod
+    def _coerce_str_lists(cls, v: object) -> object:
+        return _coerce_str_list(v)
+
+    @field_validator("evidence_refs", mode="before")
+    @classmethod
+    def _coerce_evidence_refs(cls, v: object) -> object:
+        return _coerce_model_list(v)
+
+
+class CaseSalesScript(BaseModel):
+    """案例级场景化话术。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    script_id: str
+    stage: str
+    scenario: str
+    customer_trigger: str
+    goal: str
+    source_quote: str
+    coach_wording: str
+    strategy_names: list[str] = Field(default_factory=list)
+    follow_up_questions: list[str] = Field(default_factory=list)
+    compliance_notes: list[str] = Field(default_factory=list, validate_default=True)
+    evidence_refs: list[SalesEvidenceRef] = Field(default_factory=list)
+
+    @field_validator(
+        "strategy_names",
+        "follow_up_questions",
+        "compliance_notes",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_str_lists(cls, v: object) -> object:
+        return _coerce_str_list(v)
+
+    @field_validator("compliance_notes", mode="after")
+    @classmethod
+    def _default_compliance_notes(cls, v: list[str]) -> list[str]:
+        if any(note.strip() for note in v):
+            return v
+        return [DEFAULT_COMPLIANCE_NOTE]
+
+    @field_validator("evidence_refs", mode="before")
+    @classmethod
+    def _coerce_evidence_refs(cls, v: object) -> object:
+        return _coerce_model_list(v)
+
+
+class ObjectionHandling(BaseModel):
+    """案例级异议处理建议。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    objection: str
+    diagnosis: str
+    recommended_response: str
+    related_strategy_names: list[str] = Field(default_factory=list)
+    related_script_ids: list[str] = Field(default_factory=list)
+    evidence_refs: list[SalesEvidenceRef] = Field(default_factory=list)
+
+    @field_validator("related_strategy_names", "related_script_ids", mode="before")
+    @classmethod
+    def _coerce_str_lists(cls, v: object) -> object:
+        return _coerce_str_list(v)
+
+    @field_validator("evidence_refs", mode="before")
+    @classmethod
+    def _coerce_evidence_refs(cls, v: object) -> object:
+        return _coerce_model_list(v)
+
+
+class CaseSalesInsights(BaseModel):
+    """完整案例级销售洞察。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    case_name: str
+    case_summary: str
+    customer_journey: list[CustomerJourneyStep] = Field(default_factory=list)
+    strategies: list[CaseSalesStrategy] = Field(default_factory=list)
+    scripts: list[CaseSalesScript] = Field(default_factory=list)
+    objection_handling: list[ObjectionHandling] = Field(default_factory=list)
+
+    @field_validator(
+        "customer_journey",
+        "strategies",
+        "scripts",
+        "objection_handling",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_lists(cls, v: object) -> object:
+        return _coerce_model_list(v)
