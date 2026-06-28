@@ -27,11 +27,12 @@ output/
 web_runs/
 logs/
 
-# 客户原始素材（含 GB 级音视频，不sss入库）
-数据/
+# 客户原始素材：只提交目录占位，不提交具体案例
+数据/*
+!数据/.gitkeep
 
 # 文档
-.docs/
+docs/
 
 # Test cache
 .pytest_cache/
