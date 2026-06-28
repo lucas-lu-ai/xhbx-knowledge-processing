@@ -31,7 +31,7 @@ logs/
 数据/
 
 # 文档
-docs/
+.docs/
 
 # Test cache
 .pytest_cache/
